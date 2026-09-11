@@ -1,8 +1,10 @@
 # shot
 
 **Path:** silver/google_qec/shot.parquet
-**Owner:**
-**Status:** not started
+
+**Owner:** Kartik Agarwal
+
+**Status:** Started
 
 ## What one row represents
 
