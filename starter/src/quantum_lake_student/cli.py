@@ -33,12 +33,14 @@ def command_inventory(settings: Settings) -> int:
 
 
 def command_run(_: Settings) -> int:
-    console.print(
-        "[yellow]Pipeline stages are intentionally unimplemented.[/yellow]\n"
-        "Implement your pipeline modules under src/quantum_lake_student, then "
-        "replace this command with your orchestrated Part I runner."
-    )
-    return 2
+    import uuid # generate id for each unique pipeline run
+    from .stages import prepare_data # script for table number 2
+
+    run_id = str(uuid.uuid4()) # create id for that pipeline run
+    result = prepare_data.run(run_id) # make silver table 
+    console.print(f"[green]Stage '{result.stage}' "
+                  f"{result.output_count} rows written")
+    return 0
 
 
 def command_train(_: Settings) -> int:
