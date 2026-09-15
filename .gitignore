@@ -9,3 +9,5 @@ starter/.coverage
 starter/.Trash-0/
 starter/undefined-pycharm-support-libs/
 .idea/
+starter/results/.ipynb_checkpoints/
+starter/*/.ipynb_checkpoints/
