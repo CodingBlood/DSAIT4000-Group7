@@ -332,6 +332,21 @@ def run(run_id: str) -> StageResult:
     result.output_count = len(df_exp) + len(df_shot)
     result.issue_count = (exp_dirs + shot_count) - (len(df_exp) + len(df_exp))
 
+    # client = minio_client(settings)
+    # upload_map = {
+    #     local_exp_path: "silver/google_qec/experiment.parquet",
+    #     local_shot_path: "silver/google_qec/shot.parquet",
+    #     local_trace_path: "results/part1/source_trace.parquet",
+    # }
+    #
+    # for local_file, s3_key in upload_map.items():
+    #     client.fput_object(
+    #         bucket_name=settings.s3_bucket,
+    #         object_name=s3_key,
+    #         file_path=local_file
+    #     )
+    #
+
     result.finish()
 
 
