@@ -7,7 +7,7 @@ deliverable. Repeated loads must not create duplicate records.
 
 import os
 import pandas as pd
-
+import json
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import postgres_connection
 from quantum_lake_student.models import StageResult
@@ -144,7 +144,7 @@ def run(run_id: str) -> StageResult:
     settings = Settings.from_environment()
 
     exp_path = "silver/google_qec/experiment.parquet"
-    shot_path = "silver/google_qec/shots.parquet"
+    shot_path = "silver/google_qec/shot.parquet"
 
     if not os.path.exists(exp_path):
         raise FileNotFoundError(
@@ -172,11 +172,31 @@ def run(run_id: str) -> StageResult:
                 shot_count = 0
                 prediction_count = 0
                 if df_shots is not None:
-                    shot_count, prediction_count = load_shots(cur, df_shots)
+                    load_shots(cur, df_shots)
+
+                cur.execute("SELECT COUNT(*) FROM experiment")
+                exp_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM shot")
+                shot_count = cur.fetchone()[0]
 
     result.input_count = total_input
-    result.output_count = exp_count + shot_count + decoder_count + prediction_count
-    result.issue_count = 0
+    result.output_count = exp_count + shot_count
+    result.issue_count = total_input - (exp_count + shot_count)
+
+    row_counts_path = "results/part1/row_counts.json"
+    existing = {}
+    if os.path.exists(row_counts_path):
+        with open(row_counts_path) as f:
+            existing = json.load(f)
+
+    existing["gold_load"] = {
+        "read": result.input_count,
+        "accepted": result.output_count,
+        "rejected": result.issue_count,
+    }
+
+    with open(row_counts_path, "w") as f:
+        json.dump(existing, f, indent=2)
 
     result.finish()
     return result
