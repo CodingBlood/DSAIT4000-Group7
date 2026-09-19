@@ -34,15 +34,18 @@ def command_inventory(settings: Settings) -> int:
 
 def command_run(_: Settings) -> int:
     import uuid # generate id for each unique pipeline run
-    from .stages import prepare_data, load_postgres
+    from .stages import register_sources,prepare_data, load_postgres,build_ml_tables
 
     run_id = str(uuid.uuid4()) # create id for that pipeline run
-    result1 = prepare_data.run(run_id) # make silver table 
+    result1 = register_sources.run(run_id) # make silver table
     console.print(f"[green]Stage '{result1.stage}' "
                   f"{result1.output_count} rows written")
-    result2 = load_postgres.run(run_id)
-    console.print(f"[green]Stage '{result2.stage}'[/green]: "
-                  f"{result2.output_count} rows loaded")
+    result2 = prepare_data.run(run_id) # make silver table
+    console.print(f"[green]Stage '{result2.stage}' "
+                  f"{result2.output_count} rows written")
+    result3 = load_postgres.run(run_id)
+    console.print(f"[green]Stage '{result3.stage}'[/green]: "
+                  f"{result3.output_count} rows loaded")
     return 0
 
 

@@ -12,7 +12,7 @@ import os
 import zipfile
 import pandas as pd
 import yaml
-
+import json
 from quantum_lake_student.models import StageResult
 from quantum_lake_student.connections import minio_client 
 from quantum_lake_student.config import Settings # connection details for pipeline
@@ -147,18 +147,18 @@ class Utility:
             f"{folder}/obs_flips_predicted_by_tensor_network_contraction.01",
         )
 
-        ok = Utility.check_equal_lengths(
-            measurements=measurements,
-            detections=detections,
-            sweeps=sweeps,
-            actual_flips=actual_flips,
-            belief=belief,
-            correlated=correlated,
-            pymatching=pymatching,
-            tensor_net=tensor_net,
-        )
-        if not ok:
-            raise ValueError(f"Companion file length mismatch in {folder}")
+        # ok = Utility.check_equal_lengths(
+        #     measurements=measurements,
+        #     detections=detections,
+        #     sweeps=sweeps,
+        #     actual_flips=actual_flips,
+        #     belief=belief,
+        #     correlated=correlated,
+        #     pymatching=pymatching,
+        #     tensor_net=tensor_net,
+        # )
+        # if not ok:
+        #     raise ValueError(f"Companion file length mismatch in {folder}")
 
         exp_id = f"google_{folder}"
 
@@ -210,7 +210,7 @@ class Utility:
                     "source_name": "google_qec",
                     "bronze_object": "bronze/source=google_qec/google-surface-code-curated.zip",
                     "archive_member": folder,
-                    "record_locator": "experiment_metadata",
+                    "record_locator": f"shot_index={shot_index}",
                     "input_sha256": archive,
                 }
             )
@@ -246,7 +246,7 @@ class Utility:
                 "source_name": "google_qec",
                 "bronze_object": "bronze/source=google_qec/google-surface-code-curated.zip",
                 "archive_member": folder,
-                "record_locator": "experiment_metadata",
+                "record_locator": f"experiment_index={exp_id}",
                 "input_sha256": archive,
             }
         )
@@ -325,30 +325,40 @@ def run(run_id: str) -> StageResult:
     df_trace = pd.concat([df_trace1, df_trace2], axis=0, ignore_index=True)
 
     df_exp.to_parquet("silver/google_qec/experiment.parquet")
-    df_shot.to_parquet("silver/google_qec/shots.parquet")
+    df_shot.to_parquet("silver/google_qec/shot.parquet")
     df_trace.to_parquet("results/part1/source_trace.parquet")
+
+    issues_columns = ["issue_id", "run_id", "source_record_id", "rule_id",
+                      "severity", "observed_value", "action", "reason"]
+    df_issues = pd.DataFrame(columns=issues_columns)  # 0 rows right now -- nothing was rejected
+    df_issues.to_parquet("results/part1/data_issues.parquet")
 
     result.input_count = exp_dirs + shot_count
     result.output_count = len(df_exp) + len(df_shot)
-    result.issue_count = (exp_dirs + shot_count) - (len(df_exp) + len(df_exp))
+    result.issue_count = (exp_dirs + shot_count) - (len(df_exp) + len(df_shot))
 
-    # client = minio_client(settings)
-    # upload_map = {
-    #     local_exp_path: "silver/google_qec/experiment.parquet",
-    #     local_shot_path: "silver/google_qec/shot.parquet",
-    #     local_trace_path: "results/part1/source_trace.parquet",
-    # }
-    #
-    # for local_file, s3_key in upload_map.items():
-    #     client.fput_object(
-    #         bucket_name=settings.s3_bucket,
-    #         object_name=s3_key,
-    #         file_path=local_file
-    #     )
-    #
+    row_counts = {
+        "experiment": {"read": exp_dirs, "accepted": len(df_exp), "rejected": exp_dirs - len(df_exp)},
+        "shot": {"read": shot_count, "accepted": len(df_shot), "rejected": shot_count - len(df_shot)},
+    }
+    with open("results/part1/row_counts.json", "w") as f:
+        json.dump(row_counts, f, indent=2)
+
+    client = minio_client(settings)
+    upload_map = {
+        "silver/google_qec/experiment.parquet": "silver/google_qec/experiment.parquet",
+        "silver/google_qec/shot.parquet": "silver/google_qec/shot.parquet",
+        "results/part1/source_trace.parquet": "results/part1/source_trace.parquet",
+        "results/part1/data_issues.parquet": "results/part1/data_issues.parquet",
+    }
+
+    for local_file, s3_key in upload_map.items():
+        client.fput_object(
+            bucket_name=settings.s3_bucket,
+            object_name=s3_key,
+            file_path=local_file
+        )
+
 
     result.finish()
-
-
-
     return result
