@@ -9,4 +9,6 @@ from quantum_lake_student.models import StageResult
 
 
 def run(run_id: str) -> StageResult:
-    raise NotImplementedError("Implement analysis outputs and ML input tables")
+    # raise NotImplementedError("Implement analysis outputs and ML input tables")
+    print(f"Stage '{run_id}' started")
+    print(f"Stage '{run_id}' Ended")
