@@ -13,6 +13,7 @@ import zipfile
 import pandas as pd
 import yaml
 import json
+import re
 from quantum_lake_student.models import StageResult
 from quantum_lake_student.connections import minio_client 
 from quantum_lake_student.config import Settings # connection details for pipeline
@@ -307,58 +308,426 @@ class Utility:
         trace_df = pd.DataFrame(all_trace_rows)
         
         return shot_df, trace_df, len(all_shot_rows)
+        
+    #----------------------------------Sahil's Code Starts here---------------------------------------------------------
+    @staticmethod
+    def fetch_qasmbench_raw_bytes(settings) -> bytes:
+        client = minio_client(settings)  # connection
+        key = "bronze/source=qasmbench/qasmbench-qec.zip"
+        response = client.get_object(settings.s3_bucket, key)  # retrieve the dataset
+        raw_bytes = response.read()  # load all the data into RAM
+        response.close()
+        response.release_conn()  # return the connection
+        return raw_bytes
+     
+     
+    @staticmethod
+    def list_qasmbench_circuits(raw_bytes: bytes) -> list[tuple[str, str, str]]:
+        """Every .qasm circuit in the archive as (benchmark, variant, member).
+        Same idea as list_zip_folders -- discover what to loop over from the
+        archive itself instead of hardcoding it."""
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            names = z.namelist()
+        circuits = []
+        for member in sorted(names):
+            if not member.endswith(".qasm"):
+                continue
+            filename = member.rsplit("/", 1)[-1].removesuffix(".qasm")
+            benchmark = member.rsplit("/", 2)[-2]
+            variant = "transpiled" if filename.endswith("_transpiled") else "source"
+            circuits.append((benchmark, variant, member))
+        return circuits
+     
+     
+    @staticmethod
+    def clean_lines(text):
+        """Strip comments and blank lines out of the raw QASM text."""
+        lines = []
+        for line in text.split("\n"):
+            line = line.split("//")[0].strip()   # drop comments, drop whitespace
+            if line:                              # skip blank lines
+                lines.append(line)
+        return lines
+     
+     
+    @staticmethod
+    def get_registers(lines):
+        """Collect qreg/creg name -> declared size."""
+        registers = {}
+        for line in lines:
+            if line.startswith("qreg") or line.startswith("creg"):
+                name = line.split()[1].split("[")[0]
+                size = int(line.split("[")[1].split("]")[0])
+                registers[name] = size
+        return registers
+     
+     
+    @staticmethod
+    def get_gate_definition(lines):
+        """Find the one custom `gate NAME params { body }` block, if any."""
+        for i, line in enumerate(lines):
+            if line.startswith("gate "):
+                header = line.split("{")[0]
+                gate_name = header.split()[1]
+                params = header.split()[2].split(",")
+     
+                body_text = ""
+                for body_line in lines[i:]:
+                    body_text += body_line
+                    if "}" in body_line:
+                        break
+                body_text = body_text.split("{", 1)[1].split("}", 1)[0]
+                body = [s.strip() for s in body_text.split(";") if s.strip()]
+                return gate_name, params, body
+        return None, None, None
+     
+     
+    @staticmethod
+    def expand_gate_call(call_line, gate_name, params, body):
+        """Substitute real qubit names into a custom gate's body at its call site."""
+        args = call_line.split(gate_name, 1)[1].strip(" ;").split(",")
+        args = [a.strip() for a in args]
+        substitution = dict(zip(params, args))
+     
+        expanded = []
+        for stmt in body:
+            for param, real_qubit in substitution.items():
+                # \b...\b avoids accidentally replacing "q" inside "q2" etc.
+                stmt = re.sub(rf"\b{re.escape(param)}\b", real_qubit, stmt)
+            expanded.append(stmt)
+        return expanded
+     
+     
+    @staticmethod
+    def get_flat_statements(lines, registers):
+        """Flatten declarations/gate-calls/whole-register measures into a single
+        list of (statement_index, statement) pairs, expanding the custom gate
+        body inline and expanding whole-register `measure a -> syn;` into one
+        entry per qubit/bit pair. `barrier` is skipped -- it's a compiler fence,
+        not an executed operation, so it must not count as a statement."""
+        gate_name, params, body = Utility.get_gate_definition(lines)
+     
+        flat = []
+        inside_gate_def = False
+        stmt_index = 0
+        for line in lines:
+            if line.startswith("OPENQASM") or line.startswith("include"):
+                stmt_index += 1
+                continue
+            if line.startswith("qreg") or line.startswith("creg"):
+                stmt_index += 1
+                continue
+            if line.startswith("gate "):
+                inside_gate_def = "}" not in line
+                stmt_index += 1
+                continue
+            if inside_gate_def:
+                if "}" in line:
+                    inside_gate_def = False
+                continue
+            if line.startswith("barrier"):
+                continue
+     
+            for stmt in line.split(";"):
+                stmt = stmt.strip()
+                if not stmt:
+                    continue
+     
+                this_index = stmt_index
+                stmt_index += 1
+     
+                if gate_name and stmt.startswith(gate_name + " "):
+                    for expanded_stmt in Utility.expand_gate_call(stmt, gate_name, params, body):
+                        flat.append((this_index, expanded_stmt))
+                    continue
+     
+                if stmt.startswith("measure"):
+                    qubit_arg = stmt.split()[1]
+                    bit_arg = stmt.split("->")[1].strip()
+                    if "[" not in qubit_arg and qubit_arg in registers:
+                        size = registers[qubit_arg]
+                        for i in range(size):
+                            flat.append((this_index, f"measure {qubit_arg}[{i}] -> {bit_arg}[{i}]"))
+                        continue
+     
+                flat.append((this_index, stmt))
+        return flat
+     
+     
+    @staticmethod
+    def get_syndrome_registers(flat_statements):
+        """Classical registers that are actually read by an if(reg==value) --
+        a wire only counts as a real syndrome ancilla if it feeds one of these."""
+        syndrome_registers = set()
+        for _idx, stmt in flat_statements:
+            if stmt.startswith("if("):
+                reg_name = stmt.split("(")[1].split("==")[0].strip()
+                syndrome_registers.add(reg_name)
+        return syndrome_registers
+     
+     
+    @staticmethod
+    def find_stabilizer_checks(flat_statements):
+        """Walk the flattened statements once: a cx accumulates a data qubit
+        against its target (candidate ancilla); a measure of that target into a
+        register some `if` reads turns it into a confirmed stabilizer check."""
+        syndrome_registers = Utility.get_syndrome_registers(flat_statements)
+     
+        pending_targets = {}       # ancilla qubit -> (data qubits, build stmt indices)
+        checks = []
+     
+        for idx, stmt in flat_statements:
+            if stmt.startswith("cx"):
+                qubits = stmt.replace("cx", "").strip().split(",")
+                source, target = qubits[0].strip(), qubits[1].strip()
+                data_qubits, build_indices = pending_targets.setdefault(target, ([], []))
+                data_qubits.append(source)
+                build_indices.append(idx)
+     
+            elif stmt.startswith("measure"):
+                qubit = stmt.split()[1]
+                bit = stmt.split("->")[1].strip()
+                reg_name = bit.split("[")[0]
+     
+                if qubit in pending_targets and reg_name in syndrome_registers:
+                    data_qubits, build_indices = pending_targets[qubit]
+                    checks.append({
+                        "check_id": qubit,
+                        "ancilla_qubit": qubit,
+                        "data_qubits": sorted(set(data_qubits)),
+                        "syndrome_bit": bit,
+                        "build_stmt_indices": sorted(set(build_indices)),
+                        "measure_stmt_index": idx,
+                    })
+                pending_targets.pop(qubit, None)
+     
+        return checks
+     
+     
+    @staticmethod
+    def extract_stabilizer_checks(qasm_text):
+        """Top-level parse: raw QASM text in, (checks, registers) out."""
+        lines = Utility.clean_lines(qasm_text)
+        registers = Utility.get_registers(lines)
+        flat_statements = Utility.get_flat_statements(lines, registers)
+        return Utility.find_stabilizer_checks(flat_statements), registers
+     
+     
+    @staticmethod
+    def validate_check(check, registers):
+        """Reject a malformed check with a reason instead of silently accepting
+        it -- these reasons become rows in data_issues.parquet."""
+        problems = []
+     
+        def reg_and_index(qubit_ref):
+            name, idx = qubit_ref.split("[")
+            return name, int(idx.rstrip("]"))
+     
+        if not check["data_qubits"]:
+            problems.append(("stabilizer_check_has_data_qubits", check["ancilla_qubit"]))
+        if check["ancilla_qubit"] in check["data_qubits"]:
+            problems.append(("stabilizer_ancilla_not_data_qubit", check["ancilla_qubit"]))
+     
+        for qubit_ref in [check["ancilla_qubit"], *check["data_qubits"]]:
+            try:
+                reg, idx = reg_and_index(qubit_ref)
+            except ValueError:
+                problems.append(("stabilizer_qubit_indexed", qubit_ref))
+                continue
+            if reg not in registers:
+                problems.append(("stabilizer_register_declared", qubit_ref))
+            elif idx >= registers[reg]:
+                problems.append(("stabilizer_index_in_range", qubit_ref))
+     
+        syn_reg, syn_idx = check["syndrome_bit"].split("[")
+        syn_idx = int(syn_idx.rstrip("]"))
+        if syn_reg not in registers:
+            problems.append(("stabilizer_syndrome_register_declared", check["syndrome_bit"]))
+        elif syn_idx >= registers[syn_reg]:
+            problems.append(("stabilizer_syndrome_bit_in_range", check["syndrome_bit"]))
+     
+        return problems
+     
+     
+    @staticmethod
+    def build_stabilizer_check_rows(raw_bytes: bytes, benchmark: str, variant: str, member: str, archive_sha256: str):
+        """Parses ONE circuit. Returns (check_rows, trace_rows, issue_rows) --
+        mirrors build_experiment_rows(raw_bytes, folder)."""
+        circuit_id = f"qasmbench:{benchmark}:{variant}"  # matches table 6's convention
+     
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            qasm_text = z.open(member).read().decode()
+     
+        checks, registers = Utility.extract_stabilizer_checks(qasm_text)
+     
+        check_rows = []  # storage for accepted check rows
+        trace_rows = []  # storage for trace table
+        issue_rows = []  # storage for rejected checks
+     
+        for check in checks:
+            source_record_id = (
+                f"qasmbench:{member}#stmt={check['measure_stmt_index']}"
+                f":check={check['ancilla_qubit']}"
+            )
+            problems = Utility.validate_check(check, registers)
+     
+            if problems:
+                for rule_id, observed in problems:
+                    issue_rows.append(
+                        {
+                            "issue_id": "issue_" + hashlib.md5(f"{source_record_id}:{rule_id}".encode()).hexdigest()[:12],
+                            "source_record_id": source_record_id,
+                            "rule_id": rule_id,
+                            "severity": "error",
+                            "observed_value": str(observed),
+                            "action": "rejected",
+                            "reason": rule_id.replace("_", " "),
+                        }
+                    )
+                continue
+     
+            check_rows.append(
+                {
+                    "source_record_id": source_record_id,
+                    "circuit_id": circuit_id,
+                    "check_id": check["check_id"],
+                    "ancilla_qubit": check["ancilla_qubit"],
+                    "data_qubits": check["data_qubits"],
+                    "syndrome_bit": check["syndrome_bit"],
+                }
+            )
+     
+            for stmt_idx in sorted(set(check["build_stmt_indices"]) | {check["measure_stmt_index"]}):
+                trace_rows.append(
+                    {
+                        "source_record_id": source_record_id,
+                        "source_name": "qasmbench",
+                        "bronze_object": "bronze/source=qasmbench/qasmbench-qec.zip",
+                        "archive_member": member,
+                        "record_locator": f"stmt={stmt_idx}",
+                        "input_sha256": archive_sha256,
+                    }
+                )
+     
+        return check_rows, trace_rows, issue_rows
+     
+     
+    @staticmethod
+    def qasmbench_stabilizer_check_table(raw_bytes: bytes):
+        """Loops over every circuit found in the archive. Returns (check_df,
+        trace_df, issues_df, candidate_count) -- mirrors
+        google_experiment_table(raw_bytes)."""
+        circuits = Utility.list_qasmbench_circuits(raw_bytes)
+        archive = hashlib.sha256(raw_bytes).hexdigest()  # proof of the version
+     
+        all_check_rows = []
+        all_trace_rows = []
+        all_issue_rows = []
+        candidate_count = 0
+     
+        for benchmark, variant, member in circuits:
+            check_rows, trace_rows, issue_rows = Utility.build_stabilizer_check_rows(
+                raw_bytes, benchmark, variant, member, archive
+            )
+            candidate_count += len(check_rows) + len(issue_rows)
+            all_check_rows.extend(check_rows)
+            all_trace_rows.extend(trace_rows)
+            all_issue_rows.extend(issue_rows)
+     
+        check_df = pd.DataFrame(
+            all_check_rows,
+            columns=["source_record_id", "circuit_id", "check_id", "ancilla_qubit", "data_qubits", "syndrome_bit"],
+        ).astype(
+            {
+                "source_record_id": "string",
+                "circuit_id": "string",
+                "check_id": "string",
+                "ancilla_qubit": "string",
+                "syndrome_bit": "string",
+            }
+        )
+        trace_df = pd.DataFrame(all_trace_rows)
+        issues_df = pd.DataFrame(
+            all_issue_rows,
+            columns=["issue_id", "source_record_id", "rule_id", "severity", "observed_value", "action", "reason"],
+        )
+     
+        return check_df, trace_df, issues_df, candidate_count
 
 
 
 def run(run_id: str) -> StageResult:
     result = StageResult(stage="prepare_data", run_id=run_id)
-
+ 
     settings = Settings.from_environment()
-    os.makedirs("silver/google_qec", exist_ok = True)
-    os.makedirs("results/part1", exist_ok = True)
-
+    os.makedirs("silver/google_qec", exist_ok=True)
+    os.makedirs("silver/qasmbench", exist_ok=True)
+    os.makedirs("results/part1", exist_ok=True)
+ 
     raw_bytes = Utility.fetch_raw_data_bytes(settings)
-
+ 
     df_exp, df_trace1, exp_dirs = Utility.google_experiment_table(raw_bytes)
     df_shot, df_trace2, shot_count = Utility.google_shots_table(raw_bytes)
-
+ 
     df_trace = pd.concat([df_trace1, df_trace2], axis=0, ignore_index=True)
-
-    df_exp.to_parquet("silver/google_qec/experiment.parquet")
-    df_shot.to_parquet("silver/google_qec/shot.parquet")
-    df_trace.to_parquet("results/part1/source_trace.parquet")
-
+ 
     issues_columns = ["issue_id", "run_id", "source_record_id", "rule_id",
                       "severity", "observed_value", "action", "reason"]
     df_issues = pd.DataFrame(columns=issues_columns)  # 0 rows right now -- nothing was rejected
-    df_issues.to_parquet("results/part1/data_issues.parquet")
-
-    result.input_count = exp_dirs + shot_count
-    result.output_count = len(df_exp) + len(df_shot)
-    result.issue_count = (exp_dirs + shot_count) - (len(df_exp) + len(df_shot))
-
+ 
     row_counts = {
         "experiment": {"read": exp_dirs, "accepted": len(df_exp), "rejected": exp_dirs - len(df_exp)},
         "shot": {"read": shot_count, "accepted": len(df_shot), "rejected": shot_count - len(df_shot)},
     }
-    with open("results/part1/row_counts.json", "w") as f:
-        json.dump(row_counts, f, indent=2)
-
-    client = minio_client(settings)
+ 
     upload_map = {
         "silver/google_qec/experiment.parquet": "silver/google_qec/experiment.parquet",
         "silver/google_qec/shot.parquet": "silver/google_qec/shot.parquet",
         "results/part1/source_trace.parquet": "results/part1/source_trace.parquet",
         "results/part1/data_issues.parquet": "results/part1/data_issues.parquet",
     }
-
+ 
+    result.input_count = exp_dirs + shot_count
+    result.output_count = len(df_exp) + len(df_shot)
+    result.issue_count = (exp_dirs + shot_count) - (len(df_exp) + len(df_shot))
+ 
+    # --- table 5 wiring: stabilizer_check ---
+    qasmbench_raw_bytes = Utility.fetch_qasmbench_raw_bytes(settings)
+    df_stabilizer, df_trace3, df_issues3, stabilizer_candidates = (
+        Utility.qasmbench_stabilizer_check_table(qasmbench_raw_bytes)
+    )
+    df_stabilizer.to_parquet("silver/qasmbench/stabilizer_check.parquet")
+ 
+    df_trace = pd.concat([df_trace, df_trace3], axis=0, ignore_index=True)
+    df_issues = pd.concat([df_issues, df_issues3], axis=0, ignore_index=True)
+ 
+    row_counts["stabilizer_check"] = {
+        "read": stabilizer_candidates,
+        "accepted": len(df_stabilizer),
+        "rejected": stabilizer_candidates - len(df_stabilizer),
+    }
+    upload_map["silver/qasmbench/stabilizer_check.parquet"] = "silver/qasmbench/stabilizer_check.parquet"
+ 
+    result.input_count += stabilizer_candidates
+    result.output_count += len(df_stabilizer)
+    result.issue_count += stabilizer_candidates - len(df_stabilizer)
+    # --- end table 5 wiring ---
+ 
+    df_exp.to_parquet("silver/google_qec/experiment.parquet")
+    df_shot.to_parquet("silver/google_qec/shot.parquet")
+    df_trace.to_parquet("results/part1/source_trace.parquet")
+    df_issues.to_parquet("results/part1/data_issues.parquet")
+ 
+    with open("results/part1/row_counts.json", "w") as f:
+        json.dump(row_counts, f, indent=2)
+ 
+    client = minio_client(settings)
     for local_file, s3_key in upload_map.items():
         client.fput_object(
             bucket_name=settings.s3_bucket,
             object_name=s3_key,
             file_path=local_file
         )
-
-
+ 
     result.finish()
     return result
