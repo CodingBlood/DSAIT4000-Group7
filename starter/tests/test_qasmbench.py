@@ -262,3 +262,133 @@ def test_identifier_does_not_depend_on_the_archive_it_arrives_in():
         buffer.getvalue(), "demo_n5", "source", MEMBER, FAKE_SHA
     )
     assert rows_a[0]["source_record_id"] == rows_b[0]["source_record_id"]
+
+
+# --------------------------------------------------------------------------
+# Silver table 4 -- circuit
+#
+# The counting rules are the part worth testing: silver-tables.md says "count
+# the expanded executed operations, not only the number of QASM statement
+# lines", and data-sources.md warns that "gate definition bodies are
+# definitions, not additional executed operations".
+# --------------------------------------------------------------------------
+
+LIBRARY = "gate h a { U(0,0,0) a; }\ngate x a { U(0,0,0) a; }\ngate cx c,t { CX c,t; }\n"
+
+
+def circuits(qasm: str, member: str = MEMBER, library: str = LIBRARY):
+    return Utility.build_circuit_rows(
+        archive_of(qasm, member), "demo_n5", "source", member, FAKE_SHA, library
+    )
+
+
+def test_whole_register_measure_counts_every_qubit():
+    """`measure a -> syn` on qreg a[2] is TWO measurements, not one line."""
+    qasm = "OPENQASM 2.0;\nqreg a[2];\ncreg syn[2];\nmeasure a -> syn;\n"
+    rows, _t, issues = circuits(qasm)
+    assert issues == []
+    assert rows[0]["measurement_count"] == 2
+
+
+def test_gate_macro_body_expands_at_the_call_site_only():
+    """The four cx in `gate syndrome {...}` count once, when it is called."""
+    qasm = """OPENQASM 2.0;
+qreg q[3];
+qreg a[2];
+gate syndrome d1,d2,d3,a1,a2
+{
+  cx d1,a1; cx d2,a1;
+  cx d2,a2; cx d3,a2;
+}
+syndrome q[0],q[1],q[2],a[0],a[1];
+"""
+    rows, _t, _i = circuits(qasm)
+    assert rows[0]["two_qubit_gate_count"] == 4
+
+    # ...and calling it twice doubles the count, proving it is the call site
+    # that executes, not the definition.
+    twice = qasm + "syndrome q[0],q[1],q[2],a[0],a[1];\n"
+    rows_twice, _t, _i = circuits(twice)
+    assert rows_twice[0]["two_qubit_gate_count"] == 8
+
+
+def test_barrier_is_not_an_executed_operation():
+    base = "OPENQASM 2.0;\nqreg q[3];\ncx q[0],q[1];\n"
+    without, _t, _i = circuits(base)
+    with_barrier, _t, _i = circuits(base + "barrier q[0],q[1],q[2];\n")
+    assert without[0]["two_qubit_gate_count"] == with_barrier[0]["two_qubit_gate_count"] == 1
+
+
+def test_library_gates_are_not_expanded_into_their_definitions():
+    """A cx is ONE two-qubit operation, not its U/CX decomposition."""
+    qasm = "OPENQASM 2.0;\nqreg q[2];\ncx q[0],q[1];\n"
+    rows, _t, _i = circuits(qasm)
+    assert rows[0]["two_qubit_gate_count"] == 1
+
+
+def test_single_qubit_gates_are_not_counted_as_two_qubit():
+    qasm = "OPENQASM 2.0;\nqreg q[2];\nh q[0];\nx q[1];\ncx q[0],q[1];\n"
+    rows, _t, _i = circuits(qasm)
+    assert rows[0]["two_qubit_gate_count"] == 1
+
+
+def test_register_declarations_are_serialized_repeatably():
+    qasm = "OPENQASM 2.0;\nqreg q[3];\nqreg a[2];\ncreg c[3];\ncreg syn[2];\n"
+    first, _t, _i = circuits(qasm)
+    second, _t, _i = circuits(qasm)
+    assert first[0]["register_declarations"] == second[0]["register_declarations"]
+    assert first[0]["register_declarations"] == "qreg q[3];qreg a[2];creg c[3];creg syn[2]"
+    assert first[0]["qubit_count"] == 5, "qubit_count sums every qreg, not just the first"
+
+
+@pytest.mark.parametrize(
+    "qasm, expected_rule",
+    [
+        ("OPENQASM 2.0;\ncreg c[3];\n", "qasm_circuit_qreg_declared"),
+        ("OPENQASM 2.0;\nqreg q[3];\ncreg c[3];\nmeasure z -> c;\n",
+         "qasm_circuit_measure_register_declared"),
+        ("OPENQASM 2.0;\nqreg q[3];\ncreg c[2];\nmeasure q -> c;\n",
+         "qasm_circuit_measure_width_matches"),
+        ("OPENQASM 2.0;\nqreg q[3];\nh q[7];\n",
+         "qasm_circuit_operand_index_in_range"),
+    ],
+)
+def test_malformed_circuit_is_rejected_with_a_reason(qasm, expected_rule):
+    rows, traces, issues = circuits(qasm)
+    assert rows == [] and traces == []
+    assert expected_rule in rules_fired(issues)
+    issue = next(r for r in issues if r["rule_id"] == expected_rule)
+    assert issue["severity"] == "error" and issue["action"] == "rejected"
+    assert issue["observed_value"] and issue["reason"]
+
+
+def test_unknown_gate_warns_but_keeps_the_row():
+    """Gate names are checked against the archive's own qelib1.inc."""
+    qasm = "OPENQASM 2.0;\nqreg q[2];\nnotagate q[0];\n"
+    rows, _t, issues = circuits(qasm)
+    assert len(rows) == 1, "a warning must not drop the circuit"
+    issue = next(r for r in issues if r["rule_id"] == "qasm_circuit_known_gate")
+    assert issue["severity"] == "warning" and issue["action"] == "accepted"
+    assert issue["observed_value"] == "notagate"
+
+
+def test_circuit_local_gate_is_never_reported_as_unknown():
+    qasm = """OPENQASM 2.0;
+qreg q[2];
+gate mine a,b
+{
+  cx a,b;
+}
+mine q[0],q[1];
+"""
+    rows, _t, issues = circuits(qasm)
+    assert len(rows) == 1
+    assert "qasm_circuit_known_gate" not in rules_fired(issues)
+
+
+def test_table_4_and_table_6_agree_on_circuit_id():
+    """circuit_id is table 6's foreign key. Both must derive it identically."""
+    qasm = PREAMBLE + "if(syn==1) x q[0];\n"
+    circuit_rows, _t, _i = circuits(qasm)
+    correction_rows, _t, _i = corrections(qasm)
+    assert circuit_rows[0]["circuit_id"] == correction_rows[0]["circuit_id"]

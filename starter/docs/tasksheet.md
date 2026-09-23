@@ -4,7 +4,7 @@
 |---|---|---|---|
 | register_sources.py | | not started | |
 | syndrome_observation | | not started | |
-| circuit | | not started | |
+| circuit | Divith Phogat | Finished | 6 rows in MinIO; FK target for tables 5 and 6; see docs/tables/circuit.md |
 | stabilizer_check | | not started | |
 | conditional_correction | Divith Phogat | Finished | 6 rows in MinIO; 25 tests; see docs/tables/conditional_correction.md |
 | experiment | | not started | |

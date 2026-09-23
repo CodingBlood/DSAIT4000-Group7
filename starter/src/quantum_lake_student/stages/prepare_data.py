@@ -48,6 +48,7 @@ QASM_CONDITIONAL = re.compile(r"^if\s*\(\s*(\w+)\s*==\s*(\d+)\s*\)\s*(.+)$")
 QASM_OPERATION = re.compile(r"^([A-Za-z_]\w*)(\s*\([^)]*\))?\s+(.+)$")
 QASM_MEASURE = re.compile(r"^measure\s+(\S+)\s*->\s*(\w+)(?:\[\s*\d+\s*\])?$")
 QASM_INDEXED_QUBIT = re.compile(r"^(\w+)\s*\[\s*(\d+)\s*\]$")
+QASM_MEASURE_FULL = re.compile(r"^measure\s+(\S+)\s*->\s*(\S+)$")
 
 
 def qasm_statements(text: str) -> list[tuple[str, str]]:
@@ -133,6 +134,92 @@ def qasm_condition_trigger_bits(register: str, value: int, width: int) -> list[s
     checks that triggered it, which is analysis question 3.
     """
     return [f"{register}[{bit}]" for bit in range(width) if value >> bit & 1]
+
+
+QASM_NOT_AN_OPERATION = {"OPENQASM", "include", "qreg", "creg", "gate", "opaque", "barrier"}
+QASM_BUILTIN_GATES = {"U", "CX"}
+
+
+def qasm_operands(operation_text: str) -> list[str]:
+    """Comma-separated operands of an operation, parameters removed."""
+    match = QASM_OPERATION.match(operation_text)
+    if match is None:
+        return []
+    return [operand.strip() for operand in match.group(3).split(",") if operand.strip()]
+
+
+def qasm_expanded_operations(
+    statements: list[tuple[str, str]],
+    qregs: dict[str, int],
+    gate_definitions: dict[str, tuple[list[str], list[str]]],
+) -> list[tuple[str, str, list[str]]]:
+    """Executed operations as (locator, gate_name, operands).
+
+    Expands the two things the QASM text hides, both of which silver-tables.md
+    requires for table 4 ("count the expanded executed operations, not only the
+    number of QASM statement lines"):
+
+      * a call to a circuit-local `gate` macro becomes the operations in its
+        body, with the caller's qubits substituted at the call site;
+      * a register-addressed operation becomes one operation per qubit, so
+        `measure a -> syn` with `qreg a[2]` is two measurements.
+
+    `barrier` is excluded -- a compiler fence, not an executed operation.
+    Library gates such as `cx` are NOT expanded into their U/CX definitions: a
+    cx is one two-qubit operation, not its decomposition. Only gates defined in
+    this circuit are macros.
+    """
+    operations: list[tuple[str, str, list[str]]] = []
+
+    def emit(locator: str, statement: str) -> None:
+        measure = QASM_MEASURE_FULL.match(statement)
+        if measure is not None:
+            qubit, bit = measure.group(1), measure.group(2)
+            if "[" not in qubit and qubit in qregs:          # whole register
+                for index in range(qregs[qubit]):
+                    operations.append((locator, "measure", [f"{qubit}[{index}]"]))
+            else:
+                operations.append((locator, "measure", [qubit]))
+            return
+
+        match = QASM_OPERATION.match(statement)
+        if match is None:
+            return
+        name = match.group(1)
+        if name in QASM_NOT_AN_OPERATION:
+            return
+
+        operands = qasm_operands(statement)
+
+        if name in gate_definitions:                          # circuit-local macro
+            parameters, body = gate_definitions[name]
+            substitution = dict(zip(parameters, operands))
+            for body_statement in body:
+                rewritten = body_statement
+                for parameter, actual in substitution.items():
+                    rewritten = re.sub(rf"\b{re.escape(parameter)}\b", actual, rewritten)
+                emit(locator, rewritten)
+            return
+
+        operations.append((locator, name, operands))
+
+    for locator, statement in statements:
+        emit(locator, statement)
+    return operations
+
+
+def qasm_known_gate_names(library_text: str, gate_definitions: dict) -> set[str]:
+    """Gate names a circuit may legitimately call.
+
+    Read from the archive's own `qelib1.inc` rather than hardcoded, plus the
+    circuit's own definitions and the two OpenQASM builtins.
+    """
+    return (
+        set(qasm_gate_definitions(library_text))
+        | set(gate_definitions)
+        | QASM_BUILTIN_GATES
+        | {"measure", "reset"}
+    )
 
 
 class Utility:
@@ -771,6 +858,200 @@ class Utility:
 
 
 
+    #----------------------------------Divith's Code (table 4) Starts here------------------------------------------------
+    # Silver table 4: silver/qasmbench/circuit.parquet
+    # One row = one parsed circuit variant. 6 rows: 3 benchmarks x {source, transpiled}.
+    #
+    # This is the table both stabilizer_check and conditional_correction point
+    # at via circuit_id, so the identifier is built by the shared
+    # qasm_circuit_identity() and nowhere else.
+
+    CIRCUIT_RULES = {
+        "qasm_circuit_qreg_declared":
+            "circuit declares no quantum register",
+        "qasm_circuit_measure_register_declared":
+            "measure addresses a register that is not declared",
+        "qasm_circuit_measure_width_matches":
+            "register-addressed measure has mismatched qubit and bit widths",
+        "qasm_circuit_operand_index_in_range":
+            "operand index is outside its declared register size",
+        "qasm_circuit_known_gate":
+            "gate is neither defined in the circuit nor declared in qelib1.inc",
+    }
+
+    @staticmethod
+    def build_circuit_rows(
+        raw_bytes: bytes, benchmark: str, variant: str, member: str,
+        archive_sha256: str, library_text: str,
+    ):
+        """Parses ONE circuit. Returns (circuit_rows, trace_rows, issue_rows)
+        -- mirrors build_stabilizer_check_rows(...)."""
+        circuit_id, benchmark_name, variant_name = qasm_circuit_identity(member)
+
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            qasm_text = z.open(member).read().decode()
+
+        statements = qasm_statements(qasm_text)
+        qregs, cregs = qasm_registers(statements)
+        gate_definitions = qasm_gate_definitions(qasm_text)
+        known_gates = qasm_known_gate_names(library_text, gate_definitions)
+
+        source_record_id = f"qasmbench:{member}"
+        problems = []   # (rule_id, observed_value, severity)
+
+        if not qregs:
+            problems.append(("qasm_circuit_qreg_declared", member, "error"))
+
+        # --- measure statements must address declared registers of equal width
+        for _locator, statement in statements:
+            measure = QASM_MEASURE_FULL.match(statement)
+            if measure is None:
+                continue
+            qubit, bit = measure.group(1), measure.group(2)
+            qubit_register = qubit.split("[")[0]
+            bit_register = bit.split("[")[0]
+            if qubit_register not in qregs or bit_register not in cregs:
+                problems.append(("qasm_circuit_measure_register_declared", statement, "error"))
+            elif "[" not in qubit and "[" not in bit:
+                if qregs[qubit_register] != cregs[bit_register]:
+                    problems.append((
+                        "qasm_circuit_measure_width_matches",
+                        f"{statement} ({qregs[qubit_register]} qubits -> "
+                        f"{cregs[bit_register]} bits)",
+                        "error",
+                    ))
+
+        operations = qasm_expanded_operations(statements, qregs, gate_definitions)
+
+        # --- operand indices inside their declared register
+        for _locator, name, operands in operations:
+            for operand in operands:
+                indexed = QASM_INDEXED_QUBIT.match(operand)
+                if indexed is None:
+                    continue
+                register, index = indexed.group(1), int(indexed.group(2))
+                if register in qregs and index >= qregs[register]:
+                    problems.append(("qasm_circuit_operand_index_in_range", operand, "error"))
+
+        # --- gate names, checked against the archive's own qelib1.inc
+        for _locator, name, _operands in operations:
+            if name not in known_gates:
+                problems.append(("qasm_circuit_known_gate", name, "warning"))
+
+        issue_rows = [
+            {
+                "issue_id": "issue_" + hashlib.md5(
+                    f"{source_record_id}:{rule_id}:{observed}".encode()
+                ).hexdigest()[:12],
+                "source_record_id": source_record_id,
+                "rule_id": rule_id,
+                "severity": severity,
+                "observed_value": str(observed),
+                "action": "rejected" if severity == "error" else "accepted",
+                "reason": Utility.CIRCUIT_RULES[rule_id],
+            }
+            for rule_id, observed, severity in problems
+        ]
+
+        if any(severity == "error" for _r, _o, severity in problems):
+            return [], [], issue_rows
+
+        # Declaration order, which is file order, so this string is repeatable.
+        register_declarations = ";".join(
+            [f"qreg {name}[{size}]" for name, size in qregs.items()]
+            + [f"creg {name}[{size}]" for name, size in cregs.items()]
+        )
+
+        circuit_rows = [
+            {
+                "source_record_id": source_record_id,
+                "circuit_id": circuit_id,
+                "benchmark_name": benchmark_name,
+                "variant": variant_name,
+                "register_declarations": register_declarations,
+                "qubit_count": sum(qregs.values()),
+                "measurement_count": sum(
+                    1 for _l, name, _o in operations if name == "measure"
+                ),
+                "two_qubit_gate_count": sum(
+                    1 for _l, name, operands in operations
+                    if name != "measure" and len(operands) == 2
+                ),
+            }
+        ]
+
+        trace_rows = [
+            {
+                "source_record_id": source_record_id,
+                "source_name": "qasmbench",
+                "bronze_object": "bronze/source=qasmbench/qasmbench-qec.zip",
+                "archive_member": member,
+                "record_locator": "whole_member",
+                "input_sha256": archive_sha256,
+            }
+        ]
+
+        return circuit_rows, trace_rows, issue_rows
+
+    @staticmethod
+    def qasmbench_circuit_table(raw_bytes: bytes):
+        """Loops over every circuit found in the archive. Returns
+        (circuit_df, trace_df, issues_df, candidate_count) -- mirrors
+        qasmbench_stabilizer_check_table(raw_bytes)."""
+        circuits = Utility.list_qasmbench_circuits(raw_bytes)
+        archive = hashlib.sha256(raw_bytes).hexdigest()  # proof of the version
+
+        # qelib1.inc is the standard gate library shipped in the archive. It is
+        # NOT a circuit -- it is what the circuits `include`.
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            library_text = (
+                z.read("qelib1.inc").decode() if "qelib1.inc" in z.namelist() else ""
+            )
+
+        all_circuit_rows = []
+        all_trace_rows = []
+        all_issue_rows = []
+
+        for benchmark, variant, member in circuits:
+            circuit_rows, trace_rows, issue_rows = Utility.build_circuit_rows(
+                raw_bytes, benchmark, variant, member, archive, library_text
+            )
+            all_circuit_rows.extend(circuit_rows)
+            all_trace_rows.extend(trace_rows)
+            all_issue_rows.extend(issue_rows)
+
+        circuit_df = pd.DataFrame(
+            all_circuit_rows,
+            columns=["source_record_id", "circuit_id", "benchmark_name", "variant",
+                     "register_declarations", "qubit_count", "measurement_count",
+                     "two_qubit_gate_count"],
+        ).astype(
+            {
+                "source_record_id": "string",
+                "circuit_id": "string",
+                "benchmark_name": "string",
+                "variant": "string",
+                "register_declarations": "string",
+                "qubit_count": "int32",
+                "measurement_count": "int32",
+                "two_qubit_gate_count": "int32",
+            }
+        ).sort_values(["benchmark_name", "variant"]).reset_index(drop=True)
+
+        trace_df = pd.DataFrame(
+            all_trace_rows,
+            columns=["source_record_id", "source_name", "bronze_object",
+                     "archive_member", "record_locator", "input_sha256"],
+        )
+        issues_df = pd.DataFrame(
+            all_issue_rows,
+            columns=["issue_id", "source_record_id", "rule_id", "severity",
+                     "observed_value", "action", "reason"],
+        )
+
+        return circuit_df, trace_df, issues_df, len(circuits)
+
+
     #----------------------------------Divith's Code (table 6) Starts here------------------------------------------------
     # Silver table 6: silver/qasmbench/conditional_correction.parquet
     # One row = one recovery operation controlled by a measured syndrome, i.e.
@@ -1037,6 +1318,27 @@ def run(run_id: str) -> StageResult:
     result.issue_count += stabilizer_candidates - len(df_stabilizer)
     # --- end table 5 wiring ---
 
+
+    # --- table 4 wiring: circuit ---
+    df_circuit, df_trace5, df_issues5, circuit_candidates = (
+        Utility.qasmbench_circuit_table(qasmbench_raw_bytes)
+    )
+    df_circuit.to_parquet("silver/qasmbench/circuit.parquet", index=False)
+
+    df_trace = pd.concat([df_trace, df_trace5], axis=0, ignore_index=True)
+    df_issues = pd.concat([df_issues, df_issues5], axis=0, ignore_index=True)
+
+    row_counts["circuit"] = {
+        "read": circuit_candidates,
+        "accepted": len(df_circuit),
+        "rejected": circuit_candidates - len(df_circuit),
+    }
+    upload_map["silver/qasmbench/circuit.parquet"] = "silver/qasmbench/circuit.parquet"
+
+    result.input_count += circuit_candidates
+    result.output_count += len(df_circuit)
+    result.issue_count += circuit_candidates - len(df_circuit)
+    # --- end table 4 wiring ---
     # --- table 6 wiring: conditional_correction ---
     df_correction, df_trace4, df_issues4, correction_candidates = (
         Utility.qasmbench_conditional_correction_table(qasmbench_raw_bytes)
