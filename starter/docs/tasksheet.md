@@ -6,7 +6,7 @@
 | syndrome_observation | | not started | |
 | circuit | | not started | |
 | stabilizer_check | | not started | |
-| conditional_correction | | not started | |
+| conditional_correction | Divith Phogat | Finished | 6 rows in MinIO; 25 tests; see docs/tables/conditional_correction.md |
 | experiment | | not started | |
 | shot | | not started | |
 | Gold schema | | not started | |
