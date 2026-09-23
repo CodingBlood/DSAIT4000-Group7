@@ -392,3 +392,91 @@ def test_table_4_and_table_6_agree_on_circuit_id():
     circuit_rows, _t, _i = circuits(qasm)
     correction_rows, _t, _i = corrections(qasm)
     assert circuit_rows[0]["circuit_id"] == correction_rows[0]["circuit_id"]
+
+
+# --------------------------------------------------------------------------
+# Cross-table locator agreement
+#
+# This is the regression guard for the bug that prompted the shared tokenizer:
+# tables 4, 5 and 6 each had their own statement counter, and on
+# qec_sm_n5_transpiled.qasm the same `if(syn==1) x q[0];` line was statement 13
+# to one and 14 to another -- two Silver tables claiming different positions for
+# one Bronze statement, silently.
+# --------------------------------------------------------------------------
+
+REPETITION_CODE = """OPENQASM 2.0;
+include "qelib1.inc";
+qreg q[3];
+qreg a[2];
+creg c[3];
+creg syn[2];
+cx q[0],a[0];
+cx q[1],a[0];
+cx q[1],a[1];
+cx q[2],a[1];
+measure a[0] -> syn[0];
+measure a[1] -> syn[1];
+if(syn==1) x q[0];
+measure q -> c;
+"""
+
+
+def locator_of(source_record_id: str) -> str:
+    """The `L<line>.<ordinal>` part of an id, ignoring any suffix."""
+    return source_record_id.split("#", 1)[1].split(":", 1)[0]
+
+
+def test_every_qasmbench_table_uses_the_same_locator_vocabulary():
+    known = {locator for locator, _statement in qasm_statements(REPETITION_CODE)}
+
+    _circuit, circuit_traces, _i = circuits(REPETITION_CODE)
+    checks, check_traces, _i = Utility.build_stabilizer_check_rows(
+        archive_of(REPETITION_CODE), "demo_n5", "source", MEMBER, FAKE_SHA
+    )
+    corrections_rows, correction_traces, _i = corrections(REPETITION_CODE)
+
+    assert checks and corrections_rows, "fixture must produce both kinds of row"
+
+    for row in checks + corrections_rows:
+        assert locator_of(row["source_record_id"]) in known, (
+            f"{row['source_record_id']} uses a locator the shared tokenizer "
+            "does not recognise"
+        )
+
+    for trace in check_traces + correction_traces:
+        assert trace["record_locator"] in known
+
+    # table 4's grain is the whole file, so it has no statement locator
+    assert circuit_traces[0]["record_locator"] == "whole_member"
+
+
+def test_tables_agree_on_the_position_of_one_statement():
+    """The exact failure mode: two tables, one Bronze statement, two answers."""
+    locators = dict(map(reversed, qasm_statements(REPETITION_CODE)))
+    correction_line = locators["if(syn==1) x q[0]"]
+    measure_line = locators["measure a[1] -> syn[1]"]
+
+    corrections_rows, _t, _i = corrections(REPETITION_CODE)
+    checks, _t, _i = Utility.build_stabilizer_check_rows(
+        archive_of(REPETITION_CODE), "demo_n5", "source", MEMBER, FAKE_SHA
+    )
+
+    assert locator_of(corrections_rows[0]["source_record_id"]) == correction_line
+    check = next(c for c in checks if c["syndrome_bit"] == "syn[1]")
+    assert locator_of(check["source_record_id"]) == measure_line
+
+
+def test_whole_register_measure_keeps_one_locator_for_both_checks():
+    """`measure a -> syn` is one source line producing two checks. Both trace
+    back to that line -- sharing a locator here is correct, not a collision."""
+    macro_version = REPETITION_CODE.replace(
+        "measure a[0] -> syn[0];\nmeasure a[1] -> syn[1];", "measure a -> syn;"
+    )
+    checks, _t, _i = Utility.build_stabilizer_check_rows(
+        archive_of(macro_version), "demo_n5", "source", MEMBER, FAKE_SHA
+    )
+    assert len(checks) == 2
+    assert len({locator_of(c["source_record_id"]) for c in checks}) == 1
+    assert len({c["source_record_id"] for c in checks}) == 2, (
+        "the ancilla suffix must still keep the two ids distinct"
+    )

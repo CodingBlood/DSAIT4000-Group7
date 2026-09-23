@@ -190,8 +190,10 @@ nothing. Doing it after Silver is materialised and loaded into Gold would mean
 rebuilding both — and would look like exactly the identifier instability
 `brief.md:233` warns about.
 
-**Still open:** table 5 has not yet migrated to the shared tokenizer, so it
-still emits `#stmt=<index>`. Until it does, the two tables remain inconsistent.
+**Resolved 2026-09-23:** table 5 has migrated. All three QASMBench tables now
+draw locators from `qasm_statements()`, and
+`tests/test_qasmbench.py` asserts they agree on the position of the same
+statement, so this cannot regress silently. Until it does, the two tables remain inconsistent.
 
 ### Validation rules
 

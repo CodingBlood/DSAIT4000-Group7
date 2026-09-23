@@ -208,6 +208,58 @@ def qasm_expanded_operations(
     return operations
 
 
+def qasm_expanded_statements(
+    statements: list[tuple[str, str]],
+    qregs: dict[str, int],
+    cregs: dict[str, int],
+    gate_definitions: dict[str, tuple[list[str], list[str]]],
+) -> list[tuple[str, str]]:
+    """(locator, statement) with macros and register-addressed forms expanded.
+
+    Same expansion as qasm_expanded_operations(), but it hands back statement
+    TEXT rather than parsed operands, because table 5 detects parity checks by
+    pattern-matching `cx a,b` and `measure a[0] -> syn[0]` directly. A
+    whole-register `measure a -> syn` becomes one statement per qubit/bit pair,
+    which is what makes an ancilla's syndrome bit visible.
+
+    All expansions keep the locator of the statement they came from, so several
+    expanded statements can share one locator -- that is correct: they came
+    from one line of source.
+    """
+    expanded: list[tuple[str, str]] = []
+
+    def emit(locator: str, statement: str) -> None:
+        measure = QASM_MEASURE_FULL.match(statement)
+        if measure is not None:
+            qubit, bit = measure.group(1), measure.group(2)
+            if "[" not in qubit and "[" not in bit and qubit in qregs and bit in cregs:
+                for index in range(min(qregs[qubit], cregs[bit])):
+                    expanded.append((locator, f"measure {qubit}[{index}] -> {bit}[{index}]"))
+            else:
+                expanded.append((locator, statement))
+            return
+
+        match = QASM_OPERATION.match(statement)
+        if match is not None and match.group(1) in gate_definitions:
+            parameters, body = gate_definitions[match.group(1)]
+            substitution = dict(zip(parameters, qasm_operands(statement)))
+            for body_statement in body:
+                rewritten = body_statement
+                for parameter, actual in substitution.items():
+                    rewritten = re.sub(rf"\b{re.escape(parameter)}\b", actual, rewritten)
+                emit(locator, rewritten)
+            return
+
+        if match is not None and match.group(1) == "barrier":
+            return
+
+        expanded.append((locator, statement))
+
+    for locator, statement in statements:
+        emit(locator, statement)
+    return expanded
+
+
 def qasm_known_gate_names(library_text: str, gate_definitions: dict) -> set[str]:
     """Gate names a circuit may legitimately call.
 
@@ -709,9 +761,17 @@ class Utility:
     @staticmethod
     def extract_stabilizer_checks(qasm_text):
         """Top-level parse: raw QASM text in, (checks, registers) out."""
-        lines = Utility.clean_lines(qasm_text)
-        registers = Utility.get_registers(lines)
-        flat_statements = Utility.get_flat_statements(lines, registers)
+        # Migrated to the shared tokenizer so table 5's locators agree with
+        # tables 4 and 6. Previously this used Utility.get_flat_statements,
+        # whose own statement counter numbered `if(syn==1) x q[0];` in
+        # qec_sm_n5_transpiled.qasm as statement 13 while table 6 called the
+        # same line 14. Detection logic below is unchanged.
+        statements = qasm_statements(qasm_text)
+        qregs, cregs = qasm_registers(statements)
+        registers = {**qregs, **cregs}
+        flat_statements = qasm_expanded_statements(
+            statements, qregs, cregs, qasm_gate_definitions(qasm_text)
+        )
         return Utility.find_stabilizer_checks(flat_statements), registers
      
      
@@ -768,7 +828,7 @@ class Utility:
      
         for check in checks:
             source_record_id = (
-                f"qasmbench:{member}#stmt={check['measure_stmt_index']}"
+                f"qasmbench:{member}#{check['measure_stmt_index']}"
                 f":check={check['ancilla_qubit']}"
             )
             problems = Utility.validate_check(check, registers)
@@ -806,7 +866,7 @@ class Utility:
                         "source_name": "qasmbench",
                         "bronze_object": "bronze/source=qasmbench/qasmbench-qec.zip",
                         "archive_member": member,
-                        "record_locator": f"stmt={stmt_idx}",
+                        "record_locator": stmt_idx,
                         "input_sha256": archive_sha256,
                     }
                 )

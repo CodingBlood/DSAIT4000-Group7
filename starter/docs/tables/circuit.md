@@ -76,8 +76,7 @@ Library gates are **not** expanded: a `cx` is one two-qubit operation, not its
 
 ## Open questions
 
-- **Table 5 has not migrated to the shared tokenizer** and still emits
-  `#stmt=<index>` locators. Tables 4 and 6 use the shared one.
+- None outstanding. All three QASMBench tables share one tokenizer.
 
 ## Validation checks implemented
 

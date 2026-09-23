@@ -72,11 +72,10 @@ and conditional corrections?") as a multi-table join, which also satisfies the
 
 ## Open questions
 
-- **Table 5 has not migrated to the shared tokenizer** and still emits
-  `#stmt=<index>` locators, so table 5 and table 6 disagree about the position
-  of the same statement. One-line change on table 5's side; needs its owner.
-- **Table 4 (`circuit`) has no owner and no code.** Both table 5 and table 6
-  carry `circuit_id` as a foreign key into a table that does not exist yet.
+- ~~Table 5 has not migrated to the shared tokenizer~~ — **resolved**, all
+  three QASMBench tables now share `qasm_statements()`.
+- ~~Table 4 (`circuit`) has no owner and no code~~ — **resolved**, built and in
+  MinIO; FK integrity verified both ways.
 
 ## Validation checks implemented
 
