@@ -83,6 +83,7 @@ services:
     volumes:
       - ./starter:/workspace
       - ./datasets/student-bundle/core:/course-data:ro
+      - ./.git:/workspace/.git:ro
     depends_on:
       postgres:
         condition: service_healthy

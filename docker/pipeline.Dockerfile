@@ -9,7 +9,10 @@ RUN apt-get update \
         curl \
         make \
         postgresql-client \
+        git \
     && rm -rf /var/lib/apt/lists/*
+
+RUN git config --system --add safe.directory /workspace
 
 COPY docker/requirements.txt /tmp/course-requirements.txt
 RUN pip install --no-cache-dir -r /tmp/course-requirements.txt
