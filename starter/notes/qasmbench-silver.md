@@ -160,21 +160,40 @@ statements and confirms the file agrees on all three. So the rows are
 ### `source_record_id`
 
 ```
-qasmbench:<archive_member>#stmt=<statement_index>
+qasmbench:<archive_member>#L<line>.<ordinal>
 ```
 
-e.g. `qasmbench:small/qec_sm_n5/qec_sm_n5.qasm#stmt=10`
+e.g. `qasmbench:small/qec_sm_n5/qec_sm_n5.qasm#L17.0` — line 17, first
+statement on that line.
 
-A pure function of the Bronze bytes, so it is identical on every run.
-It disambiguates two textually identical `if` lines, which a content hash
-would not.
+A pure function of the Bronze bytes, so it is identical on every run, and it
+distinguishes two textually identical `if` lines (which a content hash would
+not). The `.<ordinal>` suffix exists because OpenQASM allows several statements
+on one line: `cx d1,a1; cx d2,a1;`.
 
-*Tradeoff, stated openly:* the index depends on this tokenizer's definition of a
-statement (comments stripped, gate bodies excluded, split on `;`). Freeze that
-definition with the code. `source_trace.parquet` also carries the **line
-number**, a property of the file rather than the parser, as a human-checkable
-cross-reference. Rejected alternative: keying on line number alone — two
-statements can share a line (`cx d1,a1; cx d2,a1;`).
+**Changed from `#stmt=<index>` on 2026-09-23 — and why.** The original design
+used an index into the list of executable statements. That index depends on the
+tokenizer's definition of "a statement", and we had three private tokenizers in
+`prepare_data.py`. They disagreed: on `qec_sm_n5_transpiled.qasm` the same
+`if(syn==1) x q[0];` line was statement 13 to table 5's parser and 14 to table
+6's, so two Silver tables produced *different* `source_record_id` values for the
+same Bronze statement. It only showed up on the transpiled variant — on the
+source file a `+1` from counting the `gate` header and a `−1` from skipping
+`barrier` happened to cancel.
+
+A line number is a property of the file, not of any parser, so it cannot drift
+when someone changes their mind about what counts as a statement. It is also
+checkable by hand: open the file, count to line 17.
+
+This was changed while **no Silver output existed anywhere**, so it cost
+nothing. Doing it after Silver is materialised and loaded into Gold would mean
+rebuilding both — and would look like exactly the identifier instability
+`brief.md:233` warns about.
+
+**Resolved 2026-09-23:** table 5 has migrated. All three QASMBench tables now
+draw locators from `qasm_statements()`, and
+`tests/test_qasmbench.py` asserts they agree on the position of the same
+statement, so this cannot regress silently. Until it does, the two tables remain inconsistent.
 
 ### Validation rules
 
