@@ -8,6 +8,7 @@ deliverable. Repeated loads must not create duplicate records.
 import os
 import pandas as pd
 import json
+import hashlib
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import postgres_connection
 from quantum_lake_student.models import StageResult
@@ -60,6 +61,30 @@ CREATE TABLE IF NOT EXISTS shot_prediction (
 
 CREATE INDEX IF NOT EXISTS idx_shot_experiment_id ON shot(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_shot_prediction_decoder_id ON shot_prediction(decoder_id);
+    
+CREATE TABLE IF NOT EXISTS syndrome_experiment (
+    experiment_id      TEXT PRIMARY KEY,
+    distance             INT NOT NULL CHECK (distance > 0),
+    physical_fault_rate    DOUBLE PRECISION NOT NULL CHECK (physical_fault_rate >= 0)
+);
+
+CREATE TABLE IF NOT EXISTS syndrome_pattern (
+    pattern_id      TEXT PRIMARY KEY,
+    syndrome_bits     BYTEA NOT NULL UNIQUE,
+    round_count         INT NOT NULL CHECK (round_count = 4),
+    check_count           INT NOT NULL CHECK (check_count = 4)
+);
+
+CREATE TABLE IF NOT EXISTS syndrome_observation (
+    source_record_id     TEXT PRIMARY KEY,
+    experiment_id           TEXT NOT NULL REFERENCES syndrome_experiment(experiment_id),
+    pattern_id                 TEXT NOT NULL REFERENCES syndrome_pattern(pattern_id),
+    logical_error_label           BOOLEAN NOT NULL,
+    quantity                        BIGINT NOT NULL CHECK (quantity > 0)
+);
+
+CREATE INDEX IF NOT EXISTS idx_syn_obs_experiment ON syndrome_observation(experiment_id);
+CREATE INDEX IF NOT EXISTS idx_syn_obs_pattern ON syndrome_observation(pattern_id);
 """
 
 def load_experiment(cur, df_exp: pd.DataFrame) -> int:
@@ -138,6 +163,30 @@ def load_shots(cur, df_shots: pd.DataFrame) -> tuple[int, int]:
 
     return len(df_shots), len(prediction_rows)
 
+def load_syndromes(cur, df_syn: pd.DataFrame) -> None:
+    experiments = df_syn[["experiment_id", "physical_fault_rate"]].drop_duplicates("experiment_id")
+    experiments["distance"] = experiments["experiment_id"].str.extract(r"_d(\d+)_").astype(int)
+    cur.executemany(
+        "INSERT INTO syndrome_experiment (experiment_id, distance, physical_fault_rate) VALUES (%s, %s, %s)",
+        list(experiments[["experiment_id", "distance", "physical_fault_rate"]].itertuples(index=False, name=None)),
+    )
+
+    df_syn = df_syn.copy()
+    df_syn["pattern_id"] = df_syn["syndrome_bits"].apply(lambda b: f"pat_{hashlib.md5(b).hexdigest()[:12]}")
+    patterns = df_syn[["pattern_id", "syndrome_bits", "round_count", "check_count"]].drop_duplicates("pattern_id")
+    cur.executemany(
+        "INSERT INTO syndrome_pattern (pattern_id, syndrome_bits, round_count, check_count) "
+        "VALUES (%s, %s, %s, %s) ON CONFLICT (pattern_id) DO NOTHING",
+        [(r.pattern_id, bytes(r.syndrome_bits), int(r.round_count), int(r.check_count)) for r in patterns.itertuples()],
+    )
+
+    cur.executemany(
+        "INSERT INTO syndrome_observation (source_record_id, experiment_id, pattern_id, logical_error_label, quantity) "
+        "VALUES (%s, %s, %s, %s, %s)",
+        [(r.source_record_id, r.experiment_id, r.pattern_id, bool(r.logical_error_label), int(r.quantity))
+         for r in df_syn.itertuples()],
+    )
+
 def run(run_id: str) -> StageResult:
     result = StageResult(stage="load_postgres", run_id=run_id)
 
@@ -145,16 +194,26 @@ def run(run_id: str) -> StageResult:
 
     exp_path = "silver/google_qec/experiment.parquet"
     shot_path = "silver/google_qec/shot.parquet"
+    syndrome_path = "silver/qec_syndromes/syndrome_observation.parquet"
 
     if not os.path.exists(exp_path):
         raise FileNotFoundError(
             f"{exp_path} not found. Run the prepare_data stage first."
         )
+    if not os.path.exists(shot_path):
+        raise FileNotFoundError(
+            f"{shot_path} not found. Run the prepare_data stage first."
+        )
+    if not os.path.exists(syndrome_path):
+        raise FileNotFoundError(
+            f"{syndrome_path} not found. Run the prepare_data stage first."
+        )
 
     df_exp = pd.read_parquet(exp_path)
-    df_shots = pd.read_parquet(shot_path) if os.path.exists(shot_path) else None
+    df_shots = pd.read_parquet(shot_path)
+    df_syndromes = pd.read_parquet(syndrome_path)
 
-    total_input = len(df_exp) + (len(df_shots) if df_shots is not None else 0)
+    total_input = len(df_exp) + len(df_shots) + len(df_syndromes)
 
     with postgres_connection(settings) as connection:
         with connection.transaction():
@@ -162,15 +221,14 @@ def run(run_id: str) -> StageResult:
                 cur.execute(DDL)
 
                 cur.execute(
-                    "TRUNCATE TABLE shot_prediction, shot, decoder, experiment "
+                    "TRUNCATE TABLE shot_prediction, shot, decoder, experiment, syndrome_experiment, syndrome_observation, syndrome_pattern "
                     "RESTART IDENTITY CASCADE"
                 )
 
-                exp_count = load_experiment(cur, df_exp)
-                decoder_count = load_decoders(cur)
+                load_experiment(cur, df_exp)
+                load_decoders(cur)
+                load_syndromes(cur, df_syndromes)
 
-                shot_count = 0
-                prediction_count = 0
                 if df_shots is not None:
                     load_shots(cur, df_shots)
 
@@ -178,10 +236,12 @@ def run(run_id: str) -> StageResult:
                 exp_count = cur.fetchone()[0]
                 cur.execute("SELECT COUNT(*) FROM shot")
                 shot_count = cur.fetchone()[0]
+                cur.execute("SELECT COUNT(*) FROM syndrome_observation")
+                syndrome_count = cur.fetchone()[0]
 
     result.input_count = total_input
-    result.output_count = exp_count + shot_count
-    result.issue_count = total_input - (exp_count + shot_count)
+    result.output_count = exp_count + shot_count + syndrome_count
+    result.issue_count = result.input_count - result.output_count
 
     row_counts_path = "results/part1/row_counts.json"
     existing = {}
