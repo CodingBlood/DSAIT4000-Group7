@@ -46,16 +46,21 @@ def command_run(_: Settings) -> int:
     result3 = load_postgres.run(run_id)
     console.print(f"[green]Stage '{result3.stage}'[/green]: "
                   f"{result3.output_count} rows loaded")
+
+    result4 = build_ml_tables.run(run_id)
+    console.print(f"[green]Stage '{result4.stage}'[/green]: {result4.output_count} ML rows exported")
+
     return 0
 
 
 def command_train(_: Settings) -> int:
-    console.print(
-        "[yellow]The AI/ML stage is intentionally unimplemented.[/yellow]\n"
-        "Consume the required ML input tables through the supplied helpers and "
-        "write model files and the required results/part2 files."
-    )
-    return 2
+    import uuid
+    from .stages import train
+
+    model_run_id = str(uuid.uuid4())
+    result = train.run(model_run_id)
+    console.print(f"[green]Stage '{result.stage}'[/green]: {result.output_count} predictions written")
+    return 0
 
 
 def parser() -> argparse.ArgumentParser:
