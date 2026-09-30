@@ -1,0 +1,11 @@
+{
+  "task_b": {
+    "logical_error_rate": 0.39616,
+    "balanced_accuracy": 0.6037238346478266,
+    "brier_score": 0.2349210747317171,
+    "training_time_seconds": 0.19124269485473633,
+    "prediction_time_seconds": 0.10265684127807617,
+    "train_rows": 100000,
+    "test_rows": 125000
+  }
+}
