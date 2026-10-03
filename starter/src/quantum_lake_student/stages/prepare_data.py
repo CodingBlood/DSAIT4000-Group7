@@ -222,9 +222,40 @@ class GoogleQecUtility:
         )
         exp_rows = []  # storage for experiment rows
         trace_rows = []  # storage for trace table
+        issue_rows = [] # for storage of missing/broken experiments
         exp_id = f"google_{folder}"
         exp_rec_id = f"exp_{hashlib.md5(exp_id.encode()).hexdigest()[:12]}"
         archive = hashlib.sha256(raw_bytes).hexdigest()  # proof of the version
+        
+        required_keys = [
+            "basis", "distance", "rounds", "shots",
+            "center_data_qubit_row", "center_data_qubit_col",
+            "circuit_measurements", "circuit_detectors",
+        ]
+
+        # does the file have all the required data
+        missing_keys = [key for key in required_keys if key not in properties]
+
+        if not properties or missing_keys:
+            reason = (
+            "properties missing or empty"
+            if not properties
+            else f"properties missing required keys: {missing_keys}"
+            )
+            issue_rows.append(
+                {
+                    "issue_id": "issue_" + hashlib.md5(f"{exp_id}:missing_properties".encode()).hexdigest()[:12],
+                    "source_record_id": None,
+                    "rule_id": "google_experiment_properties_present",
+                    "severity": "error",
+                    "observed_value": f"folder={folder}",
+                    "action": "rejected",
+                    "reason": reason, 
+                }
+            )
+            return exp_rows, trace_rows, issue_rows
+
+        
         exp_rows.append(
             {
                 "source_record_id": exp_rec_id,
@@ -249,32 +280,40 @@ class GoogleQecUtility:
                 "input_sha256": archive,
             }
         )
-        return exp_rows, trace_rows
+        return exp_rows, trace_rows, issue_rows
 
     @staticmethod
     def google_experiment_table(raw_bytes: bytes):
         folders = GoogleQecUtility.list_zip_folders(raw_bytes)
         all_experiment_rows = []
         all_trace_rows = []
+        all_issue_rows = []
         for folder in folders:
-            exp_rows, trace_rows = GoogleQecUtility.build_experiment_rows(raw_bytes, folder)
+            exp_rows, trace_rows, issue_rows = GoogleQecUtility.build_experiment_rows(raw_bytes, folder)
             all_experiment_rows.extend(exp_rows)
             all_trace_rows.extend(trace_rows)
+            all_issue_rows.extend(issue_rows)
 
-        experiment_df = pd.DataFrame(all_experiment_rows).astype(
-            {
-                "distance": "int32",
-                "rounds": "int32",
-                "shots": "int64",
-                "center_row": "int32",
-                "center_col": "int32",
-                "measurement_count": "int32",
-                "detector_count": "int32"
-            }
-        )
+        experiment_df = pd.DataFrame(all_experiment_rows)
+        if not experiment_df.empty:
+            experiment_df = experiment_df.astype(
+                {
+                    "distance": "int32",
+                    "rounds": "int32",
+                    "shots": "int64",
+                    "center_row": "int32",
+                    "center_col": "int32",
+                    "measurement_count": "int32",
+                    "detector_count": "int32"
+                }
+            )
 
         trace_df = pd.DataFrame(all_trace_rows)
-        return experiment_df, trace_df, len(folders)
+        issues_df = pd.DataFrame(
+            all_issue_rows,
+            columns=["issue_id", "source_record_id", "rule_id", "severity", "observed_value", "action", "reason"],
+        )
+        return experiment_df, trace_df, issues_df, len(folders)
 
     @staticmethod
     def google_shots_table(raw_bytes: bytes):
@@ -1136,9 +1175,8 @@ def run(run_id: str) -> StageResult:
 
     # google_qec
     google_raw = fetch_bronze_bytes(settings, GoogleQecUtility.BRONZE_KEY)
-    df_exp, df_trace_experiment, exp_dirs = GoogleQecUtility.google_experiment_table(google_raw)
+    df_exp, df_trace_experiment, df_issues_experiment, exp_dirs = GoogleQecUtility.google_experiment_table(google_raw)
     df_shot, df_trace_shots, shot_count = GoogleQecUtility.google_shots_table(google_raw)
-    df_issues_experiment = pd.DataFrame(columns=issues_columns)  # 0 rows right now -- nothing was rejected in Exp table
     df_issues_shots = pd.DataFrame(columns=issues_columns)  # 0 rows right now -- nothing was rejected in shot table
 
 
