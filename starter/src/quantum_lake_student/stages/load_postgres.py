@@ -368,7 +368,7 @@ def run(run_id: str) -> StageResult:
     df_check = pd.read_parquet(check_path)
     df_corr = pd.read_parquet(correction_path)
 
-     total_input = (len(df_exp) + len(df_shots) + len(df_syndromes)
+    total_input = (len(df_exp) + len(df_shots) + len(df_syndromes)
                    + len(df_circuit) + len(df_check) + len(df_corr))
 
     with postgres_connection(settings) as connection:
