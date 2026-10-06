@@ -43,3 +43,300 @@ The whole pipeline (exluding training) can be cleanly run with the **make run** 
 Different tests were written to ensure quality of the data.
 In the tests folder, various tests python folders can be found, covering all silver tables. 
  
+### Source discovery - QASMBench
+
+The archive has 19 members but only 6 of them are circuits. The rest is noise
+for our purposes: PNG renders of each circuit, a README per benchmark, a
+LICENSE, a NOTICE, and `qelib1.inc`. That last one is worth calling out,
+because it looks like a circuit and isn't. It's the standard OpenQASM gate
+library that the circuits `include`, so we parse it for gate names (more on
+that below) and never as a circuit in its own right.
+
+The six circuits are three benchmarks, each shipped twice: a `source` variant
+and a `_transpiled` one. Both get a row. Transpilation rewrites a circuit for
+real hardware, so the two files are genuinely different programs even though
+they compute the same thing, and `silver-tables.md` gives table 4 an explicit
+`variant` column for exactly this reason.
+
+**Table 4 (`circuit`)** is one row per circuit variant, so six rows. It records
+the declared registers, the qubit count, and two counts of executed operations.
+Those counts are where the real work is, because OpenQASM hides operations in
+two different ways.
+
+First, a `gate` definition body is not executed code. In `qec_sm_n5.qasm` the
+block
+
+```
+gate syndrome d1,d2,d3,a1,a2
+{
+  cx d1,a1; cx d2,a1;
+  cx d2,a2; cx d3,a2;
+}
+```
+
+contains four `cx` operations, but they only happen when the gate is called.
+The single line `syndrome q[0],q[1],q[2],a[0],a[1];` is the execution, and it
+contributes 4 two-qubit operations. Call it twice and you get 8. A parser that
+counts statement lines gets this wrong in both directions: it counts the body
+once whether or not it's invoked, and it misses the expansion at the call site.
+
+Second, an operation can address a whole register. `measure a -> syn;` is two
+measurements, not one statement, because `qreg a[2]` holds two qubits. The spec
+is explicit that we "count the expanded executed operations, not only the
+number of QASM statement lines".
+
+A third rule is easier: `barrier` is a fence for the compiler and not an
+operation at all, so it doesn't count.
+
+The verified values:
+
+| circuit | registers | qubits | measurements | 2q gates |
+|---|---|---|---|---|
+| `error_correctiond3_n5` source | `q[5]`, `c[5]` | 5 | 5 | 49 |
+| `error_correctiond3_n5` transpiled | `q[5]`, `c[5]` | 5 | 5 | 49 |
+| `qec_en_n5` source | `q[5]`, `c[5]` | 5 | 5 | 10 |
+| `qec_en_n5` transpiled | `q[5]`, `c[5]` | 5 | 5 | 10 |
+| `qec_sm_n5` source | `q[3]`, `a[2]`, `c[3]`, `syn[2]` | 5 | 5 | 4 |
+| `qec_sm_n5` transpiled | `q[3]`, `a[2]`, `c[3]`, `syn[2]` | 5 | 5 | 4 |
+
+Notice that source and transpiled agree on every count, for all three
+benchmarks. That gave us a correctness check for free. Transpilation changes
+how gates are written, not how many measurements or entangling operations a
+circuit performs, so a parser that returns different numbers for the two
+variants of one benchmark has a bug. This is also the check that would catch a
+parser skipping the gate expansion: without it, `qec_sm_n5` source has no
+literal `cx` statement at all and would report 0 two-qubit gates against its
+transpiled twin's 4.
+
+Two smaller decisions. We derive "is this a two-qubit operation?" from the
+operand count at the call site rather than from a hardcoded list of gate names,
+which means `cx`, `cz`, `swap` and anything else are handled without us
+maintaining a list. And we validate gate names against the archive's own
+`qelib1.inc` instead of a list we invent, so an unrecognised name is flagged as
+a warning rather than silently accepted. Library gates are not expanded into
+their definitions, by the way: a `cx` is one two-qubit operation, not its
+underlying `U`/`CX` decomposition.
+
+**Table 6 (`conditional_correction`)** is one row per recovery operation that a
+measured syndrome controls. In plain terms, each row says "when the damage
+signature reads N, this circuit repairs that qubit". The entire input is these
+three lines, and nothing else in the archive:
+
+```
+if(syn==1) x q[0];
+if(syn==2) x q[2];
+if(syn==3) x q[1];
+```
+
+Six rows, then: three from `qec_sm_n5.qasm` and the same three from its
+transpiled variant. The other two benchmarks contribute nothing, and we want to
+be clear that this is the data rather than a parsing failure. A crude text scan
+of every member in the archive finds `if(` on exactly 6 lines, and the parser
+agrees. We kept that reconciliation as an assertion so the two numbers have to
+match.
+
+OpenQASM 2.0 allows exactly one conditional form, `if (creg == int) operation;`.
+The condition always compares a *whole* classical register against an integer;
+there is no bit-level or inequality form in the grammar. That's why the contract
+gets away with a single `condition_register` string and a single
+`condition_value` integer, and it's also what makes the Gold join in analysis
+question 3 arithmetic rather than relational.
+
+One trap that cost us nothing but would have been nasty: `q[0]` and `a[0]` are
+different qubits. The index is local to its register, like two separate arrays
+in a program. So `target_qubit` stores the string `"q[0]"`, register name
+included. Flattening it to the integer `0` would have made it impossible to
+tell a data qubit from an ancilla.
+
+#### Record locators, and a bug we found by accident
+
+Every Silver row needs a `source_record_id` that is stable across runs and
+doesn't depend on row order. Our first design used an index into the list of
+executable statements: `qasmbench:<member>#stmt=10`.
+
+That turned out to be a trap, and finding it was the most useful thing that
+happened during this part of the work. Tables 5 and 6 had been written against
+separate tokenizers, and the two disagreed about what counts as a statement. One
+skipped `barrier` but counted the `gate` header line; the other did the
+opposite. On `qec_sm_n5.qasm` those two differences cancelled out and
+everything looked fine. On the transpiled file they didn't, and the same
+`if(syn==1) x q[0];` line was statement 13 to one table and statement 14 to
+another. Two Silver tables, two different claims about the position of one
+Bronze statement, and nothing anywhere to surface the disagreement.
+
+The fix had two halves. All three tables now draw statements from one
+tokenizer, and locators are line based: `#L17.0` means line 17, first statement on that line. The
+ordinal suffix is needed because OpenQASM allows several statements per line
+(`cx d1,a1; cx d2,a1;`). A line number belongs to the file rather than to
+anybody's parser, so it can't drift when someone changes their mind about what a
+statement is, and a reader can check it by opening the file and counting.
+
+We did this while no Silver output existed anywhere, which made it free. Had we
+found it after Gold was loaded, every identifier would have moved, and that is
+precisely the identifier instability the brief warns about. There are now three
+cross-table tests asserting that the tables agree on the position of the same
+statement, so it can't come back quietly.
+
+### Source discovery - qec_syndromes
+
+Seven CSV files and a README, and the filenames carry data the columns don't:
+
+```
+d-3_pfr-0.000010_nb-10M.csv
+  |      |             |
+  |      |             +-- nominal sample count
+  |      +-- physical fault rate
+  +-- code distance
+```
+
+`physical_fault_rate` is not a column. We parse it out of the member name,
+which is why the Silver contract lists it as its own field.
+
+One row is an aggregate, not an observation. Sixteen syndrome bits go in, one
+label comes out, and `quantity` says how many simulated shots produced exactly
+that pattern. Across the seven files that's 75,598 rows standing for 70,000,000
+weighted observations, and every single file sums to exactly 10,000,000. We
+reconcile against the `nb-10M` in the filename and raise a warning on any
+shortfall. Nothing fired, but the rule is tested against a crafted short file.
+
+The sixteen bits are a 4 by 4 grid: four checks, measured over four rounds.
+
+```
+((0, 0, 1, 0), (0, 0, 1, 0), (0, 0, 0, 0), (0, 0, 0, 0))
+  +- round 1 -+  +- round 2 -+  +- round 3 -+  +- round 4 -+
+```
+
+Flattening order matters more than it looks. The contract says "round first and
+check second", so all of round 1's checks, then all of round 2's, and so on.
+Flatten it the other way and you still get a perfectly valid 16 byte array; it's
+just silently scrambled, with nothing to tell you. This is the kind of bug that
+never raises an exception and poisons everything downstream, which is why the
+brief names it as a required check and why our test fires a single bit and
+asserts it lands at index 2 rather than index 8.
+
+Two things we deliberately did *not* do. We didn't expand `quantity` into
+individual rows, because 70 million repeated records carry no more information
+than a weight does. And we didn't deduplicate on the syndrome value. The same
+syndrome legitimately appears under both labels: at fault rate 0.005, 6,244 of
+14,643 distinct syndromes occur both ways. Those aren't duplicates, they're two
+real facts ("this pattern occurred 121,002 times and was fine" and "it occurred
+99 times and wasn't"), and collapsing them would destroy the label distribution
+that the whole modelling half depends on. So syndrome alone is not a key; the
+business key is the experiment, syndrome and label together.
+
+### The rejected relationship
+
+The brief asks us to investigate at least one relationship and reject it with
+the evidence preserved. QASMBench is the obvious candidate, and honestly it's
+bait. `error_correctiond3_n5` describes itself as a distance-three circuit. The
+Google experiments are distance three. Same words, and it's tempting.
+
+They don't join, and here's what we checked:
+
+1. **No shared identifier of any kind.** The Google directories are keyed by
+   basis, distance, rounds and processor centre coordinates. The QASM members
+   are keyed by benchmark name and variant. There's no experiment id, run id, or
+   circuit reference in either direction.
+2. **The qubit counts don't even match.** A distance-three Google experiment
+   uses 9 data qubits and 8 measure qubits, 17 in total.
+   `error_correctiond3_n5` declares `qreg q[5]`. Five. It's a different code
+   family that happens to share a distance parameter.
+3. **QASMBench has no shots and no labels.** There is nothing to join *to*. The
+   circuits are source code; they were never executed.
+
+So we keep the circuits as their own entities with no foreign key to any
+experiment. The lesson is the one the brief is actually teaching: shared
+vocabulary is not a shared identifier. Conforming the *names* of things across
+sources is good practice and belongs in Gold, but it doesn't licence inventing a
+key. We also resisted the related temptation, which `faq.md` warns about
+directly, of turning the circuits into fabricated training rows.
+
+### Quality findings
+
+| Finding | What we did |
+|---|---|
+| `README.txt` documents the column as `label`; every CSV header says `labels` | Warning in `data_issues`, action `accepted`, recorded once per archive. The header is authoritative and the rows are kept. |
+| All 7 syndrome files sum to exactly 10,000,000 (70,000,000 total) | Reconciled against the filename. No issue raised. |
+| All syndromes are shape (4,4,4,4) with domain {0,1} | No rejects. Rules still tested against crafted bad input. |
+| Same syndrome under both labels, 6,244 cases at pfr 0.005 | Kept both. Key is (experiment, syndrome, label). |
+| `experiment_id` was rendering small rates in scientific notation (`syndrome_d3_pfr1e-05`) | Now spelled as the filename spells it, `syndrome_d3_pfr0.000010`. Deterministic either way, but scientific notation inside an identifier is a trap for anyone joining on it. |
+| 19 archive members, only 6 are circuits; `qelib1.inc` is a gate library | Table 4 has 6 rows, not 3 and not 19. |
+| Only `qec_sm_n5` has conditional corrections, 3 per variant | Table 6 has exactly 6 rows. Verified against an independent text scan. |
+| Three private QASM tokenizers numbered statements differently | All three tables migrated to one shared tokenizer with line-based locators. Three regression tests guard it. |
+| Zero rows rejected across all three QASMBench tables and the syndrome table | Every rule is unit tested against a crafted failing input, since a rule that never fires on real data is otherwise unproven. |
+
+Worth being blunt about that last row. The supplied data is clean, so none of
+our rejection rules ever fire in a real run. That makes the tests the only
+evidence the rules work at all, which is why there's a crafted failure for each
+one: a condition value outside its register width, a two-qubit target where the
+contract allows one, a whole-register target, an undeclared register, an
+out-of-range index, a three-round syndrome, a non-binary bit, a zero quantity.
+
+### Analysis question 3
+
+*How does the repetition-code circuit map data qubits to parity-check ancillas,
+syndrome bits, and conditional corrections?*
+
+Two committed queries in `sql/analysis/`, run by
+`quantum_lake_student.analysis.run_analyses`, which executes every `.sql` in
+that directory and writes the results under `results/part1/analysis/`.
+
+`q3_parity_mapping.sql` answers the question directly. It joins four Gold tables
+(`conditional_correction`, `circuit`, `stabilizer_check`,
+`stabilizer_check_data_qubit`) and produces 8 rows:
+
+| syndrome_value | ancilla | syndrome_bit | checked_data_qubits | recovery |
+|---|---|---|---|---|
+| `syn == 1` | `a[0]` | `syn[0]` | `q[0], q[1]` | `x q[0]` |
+| `syn == 2` | `a[1]` | `syn[1]` | `q[1], q[2]` | `x q[2]` |
+| `syn == 3` | `a[0]` | `syn[0]` | `q[0], q[1]` | `x q[1]` |
+| `syn == 3` | `a[1]` | `syn[1]` | `q[1], q[2]` | `x q[1]` |
+
+(shown for the `source` variant; the transpiled variant gives the same four.)
+
+Read a row left to right and you get the whole chain: these data qubits feed
+this ancilla, which writes this syndrome bit, and when the syndrome reads this
+value the circuit performs that recovery. `syn == 3` appears twice because both
+checks fired, which is the point.
+
+The join between a correction and its checks is arithmetic rather than
+relational, and that's a consequence of OpenQASM. A condition compares a whole
+register against an integer, so `if(syn==3)` means every bit set in 3 fired. The
+query therefore tests bit `syndrome_index` of `condition_value`. This only works
+because Gold stores the syndrome bit split into a register and an index instead
+of as the text `"syn[0]"`, which was a good call by whoever designed that table
+and not something we'd have got from copying Silver.
+
+`q3_decode_agreement.sql` is the more interesting half. The mapping query shows
+what the circuit does; this one asks whether it's doing the right thing, using
+only the `cx` and `measure` structure and never looking at the `if` statements.
+
+Minimum-weight decoding of a repetition code goes like this: a single bit flip
+breaks exactly the checks that contain the flipped qubit, so invert it and the
+culprit is the data qubit that sits inside every check that fired and inside no
+check that stayed quiet. Both halves of that are necessary. When only `a[0]`
+fires, `q[0]` and `q[1]` are both inside every fired check, but `q[1]` also sits
+inside the quiet `a[1]`, so `q[0]` is the only candidate left standing.
+
+| condition_value | circuit_repairs | decoding_implies | candidates |
+|---|---|---|---|
+| 1 | `q[0]` | `q[0]` | 1 |
+| 2 | `q[2]` | `q[2]` | 1 |
+| 3 | `q[1]` | `q[1]` | 1 |
+
+They agree on all six corrections, with exactly one candidate each. So the
+circuit isn't just mapping syndromes to repairs in some arbitrary way; it
+implements minimum-weight decoding, and we can show that from the parity
+structure alone. `q[1]` getting repaired on `syn == 3` is the nice case: it's
+the qubit both checks share, so breaking it is the only single error that trips
+both.
+
+One absence is also a result. There's no `if` statement for `syn == 0`, and that
+is correct rather than missing. No check fired means nothing to repair. We
+deliberately don't record a row for it.
+
+Last thing, on scope. These associations are structural facts about a program we
+parsed, not statistical claims. We're describing what the circuit does, and
+nothing here says anything about how often real hardware errors land on `q[1]`
+rather than `q[0]`, which is a question the other two sources answer and this
+one can't.
