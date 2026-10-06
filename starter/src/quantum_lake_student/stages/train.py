@@ -19,15 +19,36 @@ from quantum_lake_student.models import StageResult
 from quantum_lake_student.ml import weighted_logical_error_rate
 import time
 
-SYNDROME_PATH = "results/part2/ml/ml_syndrome_decoder_example.parquet"
-GOOGLE_PATH = "results/part2/ml/ml_google_decoder_example.parquet"
+SYNDROME_PATH = "ml/ml_syndrome_decoder_example.parquet"
+GOOGLE_PATH = "ml/ml_google_decoder_example.parquet"
+MANIFEST_PATH = "/course-data/metadata/bundle-manifest.json"
 SEED = 7
+
+
+def data_release_version() -> dict:
+    with open(MANIFEST_PATH) as f:
+        manifest = json.load(f)
+    return {
+        "release_name": manifest["release_name"],
+        "release_date": manifest["release_date"],
+        "bundle_version": manifest["bundle_version"],
+    }
+
+
 def get_feature_row(df: pd.DataFrame, i: int) -> tuple:
     row_dict = {}
     for column_name in df.columns:
         row_dict[column_name] = df[column_name][i]
     return google_meta_model_input(row_dict)
 
+def data_release_version() -> dict:
+    with open(MANIFEST_PATH) as f:
+        manifest = json.load(f)
+    return {
+        "release_name": manifest["release_name"],
+        "release_date": manifest["release_date"],
+        "bundle_version": manifest["bundle_version"],
+    }
 
 def build_features(df: pd.DataFrame) -> tuple[list, list]:
     features = []
@@ -73,7 +94,7 @@ def run_task_b(df_ml: pd.DataFrame) -> dict:
         "train_rows": len(train_df),
         "test_rows": len(test_df),
     }
-        return {"predictions": predictions, "metrics": metrics, "model": model}
+    return {"predictions": predictions, "metrics": metrics, "model": model}
 
 class WeightedPriorBaseline:
     """Weighted majority/prior baseline: predicts the weighted positive rate."""
@@ -134,11 +155,12 @@ def run_task_a(df_syn: pd.DataFrame) -> dict:
 def run(model_run_id: str) -> StageResult:
     # raise NotImplementedError("Implement the documented QEC decoder training stage")
     result = StageResult(stage="train", run_id=model_run_id)
+    run_start = time.time()
 
     os.makedirs("results/part2/models", exist_ok=True)
 
-    df_google_ml = pd.read_parquet("results/part2/ml/ml_google_decoder_example.parquet")
-    df_syndrome_ml = pd.read_parquet("results/part2/ml/ml_syndrome_decoder_example.parquet")
+    df_google_ml = pd.read_parquet(GOOGLE_PATH)
+    df_syndrome_ml = pd.read_parquet(SYNDROME_PATH)
 
     task_a_result = run_task_a(df_syndrome_ml)
     task_b_result = run_task_b(df_google_ml)
@@ -173,9 +195,23 @@ def run(model_run_id: str) -> StageResult:
     except Exception:
         revision = "unknown"
     import importlib.metadata as md
+
+    timings = {"task_a": {}, "task_b": {}}
+    for model_id in task_a_result["metrics"]:
+        test_metrics = task_a_result["metrics"][model_id]["test"]
+        timings["task_a"][model_id] = {
+            "training_time_seconds": test_metrics["training_time_seconds"],
+            "prediction_time_seconds": test_metrics["prediction_time_seconds"],
+        }
+    timings["task_b"]["task_b_combined_logistic_regression"] = {
+        "training_time_seconds": task_b_result["metrics"]["training_time_seconds"],
+        "prediction_time_seconds": task_b_result["metrics"]["prediction_time_seconds"],
+    }
+    timings["total_run_seconds"] = time.time() - run_start
+
     run_record = {
         "model_run_id": model_run_id,
-        "data_release_version": os.environ.get("DATA_RELEASE_VERSION", "unknown"),
+        "data_release_version": data_release_version(),
         "input_table_hashes": {
             "ml_syndrome_decoder_example": file_hash(SYNDROME_PATH),
             "ml_google_decoder_example": file_hash(GOOGLE_PATH),
@@ -193,6 +229,7 @@ def run(model_run_id: str) -> StageResult:
             "task_b": "google_data_split: odd shot_index test, even with %10==8 validation, rest train",
         },
         "random_seed": SEED,
+        "timings": timings,
     }
     with open("results/part2/run.json", "w") as f:
         json.dump(run_record, f, indent=2)

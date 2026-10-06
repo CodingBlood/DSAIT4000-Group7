@@ -7,10 +7,8 @@ fixed contracts, and write Parquet. It must not re-read Bronze or Silver.
 
 import hashlib
 import os
-import nupmy as np
 import pandas as pd
 from quantum_lake_student.config import Settings
-from quantum_lake_student.connections import postgres_connection
 from quantum_lake_student.ml import (
     MODEL_SPLITS,
     google_data_split,
@@ -18,6 +16,12 @@ from quantum_lake_student.ml import (
     syndrome_model_input,
 )
 from quantum_lake_student.models import StageResult
+from quantum_lake_student.connections import minio_client, postgres_connection
+
+ML_DIR = "ml"
+GOOGLE_ML_PATH = "ml/ml_google_decoder_example.parquet"
+SYNDROME_ML_PATH = "ml/ml_syndrome_decoder_example.parquet"
+
 GOOGLE_QUERY = """
 SELECT
     s.source_record_id,
@@ -47,7 +51,11 @@ DECODER_NAMES = {
 
 def get_google_MlTables(settings: Settings) -> pd.DataFrame:
     with postgres_connection(settings) as conn:
-        raw = pd.read_sql(GOOGLE_QUERY, conn)
+        with conn.cursor() as cur:
+            cur.execute(GOOGLE_QUERY)
+            columns = [d.name for d in cur.description]
+            raw = pd.DataFrame(cur.fetchall(), columns=columns)
+    raw["detector_bits"] = raw["detector_bits"].apply(bytes)
 
     shot_columns = [
         "source_record_id", "experiment_id", "shot_index", "distance", "rounds",
@@ -75,7 +83,23 @@ def get_google_MlTables(settings: Settings) -> pd.DataFrame:
 
     df["example_id"] = example_ids
     df["data_split"] = data_splits
-
+    df = df.astype({
+        "example_id": "string",
+        "experiment_id": "string",
+        "shot_index": "int64",
+        "distance": "int32",
+        "rounds": "int32",
+        "center_row": "int32",
+        "center_col": "int32",
+        "detector_count": "int32",
+        "detector_event_count": "int32",
+        "actual_observable_flip": "bool",
+        "belief_matching_prediction": "bool",
+        "correlated_matching_prediction": "bool",
+        "pymatching_prediction": "bool",
+        "tensor_network_contraction_prediction": "bool",
+        "data_split": "string",
+    })
     validate_google_ml_table(df)
 
     ml_columns = [
@@ -175,22 +199,24 @@ def validate_syndrome_ml_table(df: pd.DataFrame) -> None:
 
         
 def run(run_id: str) -> StageResult:
-    # raise NotImplementedError("Implement analysis outputs and ML input tables")
     result = StageResult(stage="build_ml_tables", run_id=run_id)
     settings = Settings.from_environment()
 
-    os.makedirs("results/part2/ml", exist_ok=True)
+    os.makedirs(ML_DIR, exist_ok=True)
 
     df_google_ml = get_google_MlTables(settings)
-    df_google_ml.to_parquet("results/part2/ml/ml_google_decoder_example.parquet", index=False)
-
+    df_google_ml.to_parquet(GOOGLE_ML_PATH, index=False)
 
     df_syndrome_ml = get_syndrome_MlTable(settings)
-    df_syndrome_ml.to_parquet("results/part2/ml/ml_syndrome_decoder_example.parquet", index=False)
+    df_syndrome_ml.to_parquet(SYNDROME_ML_PATH, index=False)
 
-    
-    result.input_count = len(df_google_ml)
-    result.output_count = len(df_google_ml)
+    client = minio_client(settings)
+    for path in [GOOGLE_ML_PATH, SYNDROME_ML_PATH]:
+        client.fput_object(bucket_name=settings.s3_bucket, object_name=path, file_path=path)
+
+    total = len(df_google_ml) + len(df_syndrome_ml)
+    result.input_count = total
+    result.output_count = total
     result.issue_count = 0
     result.finish()
     return result

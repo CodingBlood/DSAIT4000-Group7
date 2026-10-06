@@ -10,7 +10,8 @@ from rich.table import Table
 
 from .config import Settings
 from .connections import bronze_inventory, check_platform
-
+import pyarrow.parquet as pq
+from .connections import postgres_connection
 
 console = Console()
 
@@ -37,6 +38,8 @@ def command_run(settings: Settings) -> int:
     import os
     import subprocess
     import uuid # generate id for each unique pipeline run
+    import pyarrow.parquet as pq
+    from .connections import postgres_connection
     from .stages import register_sources,prepare_data, load_postgres,build_ml_tables
 
     run_id = str(uuid.uuid4()) # create id for that pipeline run
@@ -52,8 +55,8 @@ def command_run(settings: Settings) -> int:
 
     result4 = build_ml_tables.run(run_id)
     console.print(f"[green]Stage '{result4.stage}'[/green]: {result4.output_count} ML rows exported")
-    # manual step for actual correct hash: git rev-parse HEAD > starter/.git-revision 
-    # THIS IS FOR RUN.JSON
+
+    
     def git_revision() -> str:
         try:
             return subprocess.check_output(
@@ -61,46 +64,59 @@ def command_run(settings: Settings) -> int:
             ).strip()
         except Exception:
             return "unknown"
+
+    stage_results = [result1, result2, result3, result4]
+
+    PARQUET_TABLES = {
+        "silver.google_qec.experiment": "silver/google_qec/experiment.parquet",
+        "silver.google_qec.shot": "silver/google_qec/shot.parquet",
+        "silver.qec_syndromes.syndrome_observation": "silver/qec_syndromes/syndrome_observation.parquet",
+        "silver.qasmbench.circuit": "silver/qasmbench/circuit.parquet",
+        "silver.qasmbench.stabilizer_check": "silver/qasmbench/stabilizer_check.parquet",
+        "silver.qasmbench.conditional_correction": "silver/qasmbench/conditional_correction.parquet",
+        "ml.ml_google_decoder_example": "ml/ml_google_decoder_example.parquet",
+        "ml.ml_syndrome_decoder_example": "ml/ml_syndrome_decoder_example.parquet",
+    }
+    GOLD_TABLES = [
+        "experiment", "shot", "decoder", "shot_prediction",
+        "syndrome_experiment", "syndrome_pattern", "syndrome_observation",
+        "circuit", "circuit_register", "circuit_qubit",
+        "stabilizer_check", "stabilizer_check_data_qubit", "conditional_correction",
+    ]
+
     table_counts = {}
-    # tries to count the Silver rows
-    try:
-        import pandas as pd
-        for name, path in [
-            ("silver.google_qec.experiment", "silver/google_qec/experiment.parquet"),
-            ("silver.google_qec.shot", "silver/google_qec/shots.parquet"),
-        ]:
-            if os.path.exists(path):
-                table_counts[name] = len(pd.read_parquet(path))
-    except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] could not count Silver rows: {exc}")
-    # tries to count the GOld rows
-    try: 
-        from .connections import postgres_connection
-        with postgres_connection(settings) as conn: # postgres connection
-            with conn.cursor() as cur:
-                for table in ["experiment", "shot", "decoder", "shot_prediction"]:
-                    cur.execute(f"SELECT COUNT(*) FROM {table}")
-                    table_counts[f"gold.{table}"] = cur.fetchone()[0] # get row count 
-    except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] could not count Gold rows: {exc}")
-    stage_results = [result1, result2, result3]
-    # record the actual run information 
+    for name, path in PARQUET_TABLES.items():
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"{path} not found, cannot count rows")
+        table_counts[name] = pq.read_metadata(path).num_rows
+
+    with postgres_connection(settings) as conn:
+        with conn.cursor() as cur:
+            for table in GOLD_TABLES:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                table_counts[f"gold.{table}"] = cur.fetchone()[0]
+
+    stages = []
+    for r in stage_results:
+        finished = None
+        if r.finished_at:
+            finished = r.finished_at.isoformat()
+        stages.append({
+            "stage": r.stage,
+            "input_count": r.input_count,
+            "output_count": r.output_count,
+            "issue_count": r.issue_count,
+            "started_at": r.started_at.isoformat(),
+            "finished_at": finished,
+        })
+
     run_record = {
-        "run_id:": run_id,
-        "code_revision: ": git_revision(),
-        "started_at:": stage_results[0].started_at.isoformat(),
-        "finished_at": stage_results[-1].finished_at.isoformat() if stage_results[-1].finished_at else None,
-        "stages" : [
-            {
-                "stage": r.stage,
-                "input_count": r.input_count,
-                "output_count": r.output_count,
-                "issue_count": r.issue_count,
-                "started_at": r.started_at.isoformat(),
-                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-            }
-            for r in stage_results
-        ], 
+        "run_id": run_id,
+        "code_revision": git_revision(),
+        "input_hashes": result1.input_hashes,
+        "started_at": stage_results[0].started_at.isoformat(),
+        "finished_at": stages[-1]["finished_at"],
+        "stages": stages,
         "table_row_count": table_counts,
     }
 

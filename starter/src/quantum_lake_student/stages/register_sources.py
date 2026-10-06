@@ -85,8 +85,12 @@ def run(run_id: str) -> StageResult:
             "member_count": member_count,
             "mandatory": info["mandatory"],
         })
-        print(f"OK: {key} — checksum and size verified, {member_count} archive members, all paths safe")
+        print(f"OK: {key}: checksum and size verified, {member_count} archive members, all paths safe")
 
+    input_hashes = {}
+    for row in registry_rows:
+        input_hashes[row["bronze_object"]] = {"sha256": row["sha256"], "bytes": row["bytes"]}
+    result.input_hashes = input_hashes
     result.input_count = len(expected)
     result.output_count = len(registry_rows)
     result.issue_count = 0
