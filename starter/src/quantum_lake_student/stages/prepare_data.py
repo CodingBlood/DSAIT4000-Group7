@@ -1024,6 +1024,8 @@ class QasmBenchUtility:
 class SyndromeUtility:
     BRONZE_KEY = "bronze/source=qec_syndromes/syndromes_dataset.zip"
     FILENAME_PATTERN = re.compile(r"d-(\d+)_pfr-([\d.]+)_nb-(\S+)\.csv")
+    # Column names README.txt claims the CSVs have, e.g. "- label: binary label".
+    DOCUMENTED_COLUMN_PATTERN = re.compile(r"^-\s*(\w+)\s*:", re.M)
 
     def __init__(self):
         pass
@@ -1039,7 +1041,15 @@ class SyndromeUtility:
         if not match:
             return None
         distance, pfr, nb = match.groups()
-        return {"distance": int(distance), "physical_fault_rate": float(pfr), "nb": nb}
+        # fault_rate_text keeps the rate exactly as the filename spells it.
+        # Formatting the float instead puts scientific notation into
+        # experiment_id: float("0.000010") renders as "1e-05".
+        return {
+            "distance": int(distance),
+            "physical_fault_rate": float(pfr),
+            "fault_rate_text": pfr,
+            "nb": nb,
+        }
 
     @staticmethod
     def parse_syndrome_bits(raw_value: str) -> bytes | None:
@@ -1060,6 +1070,54 @@ class SyndromeUtility:
         return bytes(flat_bits)
 
     @staticmethod
+    def read_documented_columns(raw_bytes: bytes) -> list[str]:
+        """Column names the bundled README.txt says the CSVs have."""
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            if "README.txt" not in z.namelist():
+                return []
+            readme = z.read("README.txt").decode("utf-8", "replace")
+        return SyndromeUtility.DOCUMENTED_COLUMN_PATTERN.findall(readme)
+
+    @staticmethod
+    def check_documented_header(
+        raw_bytes: bytes, actual_columns: list[str], run_id: str
+    ) -> list[dict]:
+        """Compare the documented column names against the real CSV header.
+
+        brief.md lists this as a minimum check: the bundled README.txt
+        documents the first column as `label`, while every CSV header actually
+        says `labels`. The data is usable either way, so this is a warning that
+        stays visible rather than a reason to reject rows.
+        """
+        documented = SyndromeUtility.read_documented_columns(raw_bytes)
+        if not documented or documented == list(actual_columns):
+            return []
+
+        missing = [name for name in documented if name not in actual_columns]
+        unexpected = [name for name in actual_columns if name not in documented]
+        return [
+            {
+                "issue_id": "iss_" + hashlib.md5(
+                    f"documented_header:{documented}:{list(actual_columns)}".encode()
+                ).hexdigest()[:12],
+                "run_id": run_id,
+                "source_record_id": None,
+                "rule_id": "syndrome_documented_header_matches",
+                "severity": "warning",
+                "observed_value": (
+                    f"README.txt documents {documented}; "
+                    f"CSV header is {list(actual_columns)}"
+                ),
+                "action": "accepted",
+                "reason": (
+                    f"documented column names differ from the header "
+                    f"(documented only: {missing}; header only: {unexpected}); "
+                    f"the header is authoritative and the rows are kept"
+                ),
+            }
+        ]
+
+    @staticmethod
     def build_rows(raw_bytes: bytes, csv_name: str, archive: str, run_id: str):
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
             with z.open(csv_name) as f:
@@ -1072,7 +1130,10 @@ class SyndromeUtility:
         if filename_meta is None:
             raise ValueError(f"Cannot parse experiment info from filename: {csv_name}")
 
-        experiment_id = f"syndrome_d{filename_meta['distance']}_pfr{filename_meta['physical_fault_rate']}"
+        experiment_id = (
+            f"syndrome_d{filename_meta['distance']}"
+            f"_pfr{filename_meta['fault_rate_text']}"
+        )
         archive_hash = hashlib.sha256(raw_bytes).hexdigest()
 
         rows, issue_rows, trace_rows = [], [], []
@@ -1145,6 +1206,18 @@ class SyndromeUtility:
     def syndrome_table(raw_bytes: bytes, archive: str, run_id: str):
         csv_names = SyndromeUtility.list_csv_members(raw_bytes)
         all_rows, all_issues, all_trace, rows_read = [], [], [], 0
+
+        # The documented-header mismatch is a property of the release, not of
+        # any one CSV, so it is recorded once rather than seven times.
+        if csv_names:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+                with z.open(csv_names[0]) as f:
+                    header_columns = list(pd.read_csv(f, nrows=0).columns)
+            all_issues.extend(
+                SyndromeUtility.check_documented_header(
+                    raw_bytes, header_columns, run_id
+                )
+            )
 
         for csv_name in csv_names:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:

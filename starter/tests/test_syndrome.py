@@ -221,7 +221,12 @@ def test_file_total_short_of_the_filename_is_flagged():
 
 def test_filename_is_parsed_into_distance_rate_and_nominal_count():
     parsed = SyndromeUtility.parse_filename("d-3_pfr-0.000500_nb-10M.csv")
-    assert parsed == {"distance": 3, "physical_fault_rate": 0.0005, "nb": "10M"}
+    assert parsed == {
+        "distance": 3,
+        "physical_fault_rate": 0.0005,
+        "fault_rate_text": "0.000500",
+        "nb": "10M",
+    }
 
 
 def test_unparseable_filename_is_rejected():
@@ -262,33 +267,85 @@ def test_identifier_does_not_depend_on_other_members_in_the_archive():
 
 
 # --------------------------------------------------------------------------
-# known gaps -- these document work still owed, and report as xfail rather
-# than failing the suite
+# the documented-header check (brief.md minimum check)
 # --------------------------------------------------------------------------
 
-@pytest.mark.xfail(
-    reason="required check not implemented: README.txt documents the column as "
-           "'label' while the CSV header is 'labels'. The mismatch should be a "
-           "data_issues row (severity=warning, action=accepted). build_rows only "
-           "raises when 'labels' is absent, so the documented finding is never "
-           "recorded. brief.md lists this as a minimum check.",
-    strict=True,
-)
+README = """The file format is a csv file with the following columns:
+- label: binary label (0: no error, 1: error)
+- syndromes: syndrome measurement sequence
+- quantity: number of samples for this label + syndrome sequence
+"""
+
+
+def archive_with_readme(csv_text: str, readme: str = README) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as handle:
+        handle.writestr("README.txt", readme)
+        handle.writestr(MEMBER, csv_text)
+    return buffer.getvalue()
+
+
+def test_documented_columns_are_read_from_the_readme():
+    assert SyndromeUtility.read_documented_columns(
+        archive_with_readme(csv_of(f'0,"{ZERO}",1'))
+    ) == ["label", "syndromes", "quantity"]
+
+
+def header_issues_for(raw: bytes) -> list[dict]:
+    """syndrome_table returns DataFrames, so pull the header rule back out."""
+    _df, issues, _trace, _read = SyndromeUtility.syndrome_table(raw, ARCHIVE, "test-run")
+    if issues.empty:
+        return []
+    matched = issues[issues["rule_id"] == "syndrome_documented_header_matches"]
+    return matched.to_dict("records")
+
+
 def test_documented_label_versus_actual_labels_is_recorded():
-    _rows, issues, _t = build(csv_of(f'0,"{ZERO}",1'))
-    header_issues = [i for i in issues if "label" in i["rule_id"]]
-    assert len(header_issues) == 1
-    assert header_issues[0]["severity"] == "warning"
-    assert header_issues[0]["action"] == "accepted"
+    """README.txt says `label`; every CSV header says `labels`. The data is
+    usable either way, so the mismatch is a warning that stays visible."""
+    found = header_issues_for(archive_with_readme(csv_of(f'0,"{ZERO}",10000000')))
+
+    assert len(found) == 1, "recorded once per archive, not once per CSV"
+    issue = found[0]
+    assert issue["severity"] == "warning"
+    assert issue["action"] == "accepted"
+    assert issue["run_id"] == "test-run"
+    assert "label" in issue["observed_value"] and "labels" in issue["observed_value"]
 
 
-@pytest.mark.xfail(
-    reason="experiment_id is built with an f-string on a float, so small rates "
-           "become scientific notation: pfr-0.000010 yields "
-           "'syndrome_d3_pfr1e-05'. Deterministic, so not a correctness bug, "
-           "but 1e-05 inside an identifier will surprise anyone joining on it.",
-    strict=True,
+def test_matching_header_raises_no_issue():
+    readme = README.replace("- label:", "- labels:")
+    assert header_issues_for(
+        archive_with_readme(csv_of(f'0,"{ZERO}",10000000'), readme)
+    ) == []
+
+
+def test_archive_without_a_readme_is_not_an_issue():
+    assert header_issues_for(archive_of(csv_of(f'0,"{ZERO}",10000000'))) == []
+
+
+# --------------------------------------------------------------------------
+# experiment_id readability
+# --------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "member, expected",
+    [
+        ("d-3_pfr-0.000010_nb-10M.csv", "syndrome_d3_pfr0.000010"),
+        ("d-3_pfr-0.000050_nb-10M.csv", "syndrome_d3_pfr0.000050"),
+        ("d-3_pfr-0.005000_nb-10M.csv", "syndrome_d3_pfr0.005000"),
+    ],
 )
-def test_experiment_id_keeps_the_fault_rate_readable():
+def test_experiment_id_spells_the_rate_as_the_filename_does(member, expected):
+    """Formatting the parsed float instead would give "syndrome_d3_pfr1e-05"
+    for the smallest rate -- deterministic, but scientific notation inside an
+    identifier is a trap for anyone joining on it."""
+    rows, _i, _t = build(csv_of(f'0,"{ZERO}",1'), member)
+    assert rows[0]["experiment_id"] == expected
+    assert "e-0" not in rows[0]["experiment_id"]
+
+
+def test_physical_fault_rate_stays_a_float_even_though_the_id_is_text():
     rows, _i, _t = build(csv_of(f'0,"{ZERO}",1'), "d-3_pfr-0.000010_nb-10M.csv")
-    assert "e-05" not in rows[0]["experiment_id"]
+    assert rows[0]["physical_fault_rate"] == 1e-05
+    assert isinstance(rows[0]["physical_fault_rate"], float)
