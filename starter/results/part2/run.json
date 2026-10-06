@@ -1,0 +1,70 @@
+{
+  "model_run_id": "5dac9643-8ebf-4913-b307-eee3b672478b",
+  "data_release_version": {
+    "release_name": "quantum-data-core",
+    "release_date": "2026-08-05",
+    "bundle_version": 3
+  },
+  "input_table_hashes": {
+    "ml_syndrome_decoder_example": "edbe27083c0a25f38efef5b72310e0250baa0cea51baa9f8f6d4c10a7e3b8f4d",
+    "ml_google_decoder_example": "03fa4b9c13479464df4a3c6e128004c606bb3e7482a36a79b250dfa66eee822e"
+  },
+  "code_revision": "8fa9a4f7bb2d7a1cf00663f38f53cac011480f98",
+  "dependency_versions": {
+    "scikit-learn": "1.9.0",
+    "pandas": "2.3.1",
+    "numpy": "2.5.3",
+    "pyarrow": "20.0.0"
+  },
+  "feature_order": {
+    "task_a": [
+      "syndrome_bit_0",
+      "syndrome_bit_1",
+      "syndrome_bit_2",
+      "syndrome_bit_3",
+      "syndrome_bit_4",
+      "syndrome_bit_5",
+      "syndrome_bit_6",
+      "syndrome_bit_7",
+      "syndrome_bit_8",
+      "syndrome_bit_9",
+      "syndrome_bit_10",
+      "syndrome_bit_11",
+      "syndrome_bit_12",
+      "syndrome_bit_13",
+      "syndrome_bit_14",
+      "syndrome_bit_15"
+    ],
+    "task_b": [
+      "detector_event_density",
+      "belief_matching_prediction",
+      "correlated_matching_prediction",
+      "pymatching_prediction",
+      "tensor_network_contraction_prediction"
+    ]
+  },
+  "split_rule": {
+    "task_a": "syndrome_data_split: 0.0005 validation, 0.005 test, rest train",
+    "task_b": "google_data_split: odd shot_index test, even with %10==8 validation, rest train"
+  },
+  "random_seed": 7,
+  "timings": {
+    "task_a": {
+      "task_a_weighted_prior_baseline": {
+        "training_time_seconds": 0.0028204917907714844,
+        "prediction_time_seconds": 0.0008618831634521484
+      },
+      "task_a_weighted_logistic_regression": {
+        "training_time_seconds": 0.1896684169769287,
+        "prediction_time_seconds": 0.0017969608306884766
+      }
+    },
+    "task_b": {
+      "task_b_combined_logistic_regression": {
+        "training_time_seconds": 0.14995384216308594,
+        "prediction_time_seconds": 0.14321589469909668
+      }
+    },
+    "total_run_seconds": 8.993110418319702
+  }
+}
