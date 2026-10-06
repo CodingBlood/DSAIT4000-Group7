@@ -10,7 +10,6 @@ import os
 import pandas as pd
 from quantum_lake_student.config import Settings
 from quantum_lake_student.ml import (
-    MODEL_SPLITS,
     google_data_split,
     syndrome_data_split,
     syndrome_model_input,

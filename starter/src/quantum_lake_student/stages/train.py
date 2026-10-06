@@ -13,7 +13,7 @@ import subprocess
 import numpy as np
 import pandas as pd
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import accuracy_score, balanced_accuracy_score, brier_score_loss
+from sklearn.metrics import balanced_accuracy_score, brier_score_loss
 from quantum_lake_student.ml import google_meta_model_input, syndrome_model_input
 from quantum_lake_student.models import StageResult
 from quantum_lake_student.ml import weighted_logical_error_rate
@@ -41,14 +41,6 @@ def get_feature_row(df: pd.DataFrame, i: int) -> tuple:
         row_dict[column_name] = df[column_name][i]
     return google_meta_model_input(row_dict)
 
-def data_release_version() -> dict:
-    with open(MANIFEST_PATH) as f:
-        manifest = json.load(f)
-    return {
-        "release_name": manifest["release_name"],
-        "release_date": manifest["release_date"],
-        "bundle_version": manifest["bundle_version"],
-    }
 
 def build_features(df: pd.DataFrame) -> tuple[list, list]:
     features = []

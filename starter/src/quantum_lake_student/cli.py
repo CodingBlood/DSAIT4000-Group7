@@ -10,8 +10,6 @@ from rich.table import Table
 
 from .config import Settings
 from .connections import bronze_inventory, check_platform
-import pyarrow.parquet as pq
-from .connections import postgres_connection
 
 console = Console()
 
@@ -87,7 +85,8 @@ def command_run(settings: Settings) -> int:
     table_counts = {}
     for name, path in PARQUET_TABLES.items():
         if not os.path.exists(path):
-            raise FileNotFoundError(f"{path} not found, cannot count rows")
+            console.print(f"[red]Missing {path}, results/part1/run.json was not written[/red]")
+            return 1
         table_counts[name] = pq.read_metadata(path).num_rows
 
     with postgres_connection(settings) as conn:

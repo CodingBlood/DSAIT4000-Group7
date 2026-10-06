@@ -11,5 +11,6 @@ starter/.Trash-0/
 starter/undefined-pycharm-support-libs/
 .idea/
 starter/silver
-starter/results/part1
+starter/ml/
 
+get-docker.sh
