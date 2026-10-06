@@ -16,14 +16,16 @@ import zipfile
 
 import pytest
 
-from quantum_lake_student.stages.prepare_data import (
-    Utility,
-    qasm_circuit_identity,
-    qasm_condition_trigger_bits,
-    qasm_gate_definitions,
-    qasm_registers,
-    qasm_statements,
-)
+from quantum_lake_student.stages.prepare_data import QasmBenchUtility
+
+# The shared QASM helpers were module-level functions when these tests were
+# written. The OOP restructuring moved them onto QasmBenchUtility as
+# staticmethods; the bodies are unchanged, so these aliases keep the tests
+# reading the same way.
+qasm_statements = QasmBenchUtility.qasm_statements
+qasm_registers = QasmBenchUtility.qasm_registers
+qasm_gate_definitions = QasmBenchUtility.qasm_gate_definitions
+qasm_circuit_identity = QasmBenchUtility.qasm_circuit_identity
 
 MEMBER = "small/demo_n5/demo_n5.qasm"
 FAKE_SHA = "0" * 64
@@ -47,8 +49,8 @@ def archive_of(qasm: str, member: str = MEMBER) -> bytes:
 
 def corrections(qasm: str, member: str = MEMBER):
     """(rows, trace_rows, issue_rows) for a one-circuit archive."""
-    return Utility.build_conditional_correction_rows(
-        archive_of(qasm, member), "demo_n5", "source", member, FAKE_SHA
+    return QasmBenchUtility.build_conditional_correction_rows(
+        archive_of(qasm, member), member, FAKE_SHA
     )
 
 
@@ -219,16 +221,11 @@ def test_circuit_identity_distinguishes_variants():
     assert qasm_circuit_identity(source)[0] != qasm_circuit_identity(transpiled)[0]
 
 
-# --------------------------------------------------------------------------
-# Gold helper
-# --------------------------------------------------------------------------
-
-@pytest.mark.parametrize(
-    "value, expected",
-    [(0, []), (1, ["syn[0]"]), (2, ["syn[1]"]), (3, ["syn[0]", "syn[1]"])],
-)
-def test_condition_value_maps_to_the_syndrome_bits_that_fired(value, expected):
-    assert qasm_condition_trigger_bits("syn", value, 2) == expected
+# qasm_condition_trigger_bits() used to live here and mapped a condition value
+# to the syndrome bits it requires (3 -> syn[0], syn[1]). It was removed during
+# the OOP restructuring as unused. That is the right call: the Gold schema
+# stores condition_value directly, so the analysis query does the bit test in
+# SQL (condition_value & 1, condition_value & 2) rather than in Python.
 
 
 # --------------------------------------------------------------------------
@@ -258,8 +255,8 @@ def test_identifier_does_not_depend_on_the_archive_it_arrives_in():
     buffer = io.BytesIO(raw)
     with zipfile.ZipFile(buffer, "a") as handle:
         handle.writestr(MEMBER, qasm)
-    rows_b, _t, _i = Utility.build_conditional_correction_rows(
-        buffer.getvalue(), "demo_n5", "source", MEMBER, FAKE_SHA
+    rows_b, _t, _i = QasmBenchUtility.build_conditional_correction_rows(
+        buffer.getvalue(), MEMBER, FAKE_SHA
     )
     assert rows_a[0]["source_record_id"] == rows_b[0]["source_record_id"]
 
@@ -277,8 +274,8 @@ LIBRARY = "gate h a { U(0,0,0) a; }\ngate x a { U(0,0,0) a; }\ngate cx c,t { CX 
 
 
 def circuits(qasm: str, member: str = MEMBER, library: str = LIBRARY):
-    return Utility.build_circuit_rows(
-        archive_of(qasm, member), "demo_n5", "source", member, FAKE_SHA, library
+    return QasmBenchUtility.build_circuit_rows(
+        archive_of(qasm, member), member, FAKE_SHA, library
     )
 
 
@@ -430,7 +427,7 @@ def test_every_qasmbench_table_uses_the_same_locator_vocabulary():
     known = {locator for locator, _statement in qasm_statements(REPETITION_CODE)}
 
     _circuit, circuit_traces, _i = circuits(REPETITION_CODE)
-    checks, check_traces, _i = Utility.build_stabilizer_check_rows(
+    checks, check_traces, _i = QasmBenchUtility.build_stabilizer_check_rows(
         archive_of(REPETITION_CODE), "demo_n5", "source", MEMBER, FAKE_SHA
     )
     corrections_rows, correction_traces, _i = corrections(REPETITION_CODE)
@@ -457,7 +454,7 @@ def test_tables_agree_on_the_position_of_one_statement():
     measure_line = locators["measure a[1] -> syn[1]"]
 
     corrections_rows, _t, _i = corrections(REPETITION_CODE)
-    checks, _t, _i = Utility.build_stabilizer_check_rows(
+    checks, _t, _i = QasmBenchUtility.build_stabilizer_check_rows(
         archive_of(REPETITION_CODE), "demo_n5", "source", MEMBER, FAKE_SHA
     )
 
@@ -472,7 +469,7 @@ def test_whole_register_measure_keeps_one_locator_for_both_checks():
     macro_version = REPETITION_CODE.replace(
         "measure a[0] -> syn[0];\nmeasure a[1] -> syn[1];", "measure a -> syn;"
     )
-    checks, _t, _i = Utility.build_stabilizer_check_rows(
+    checks, _t, _i = QasmBenchUtility.build_stabilizer_check_rows(
         archive_of(macro_version), "demo_n5", "source", MEMBER, FAKE_SHA
     )
     assert len(checks) == 2
