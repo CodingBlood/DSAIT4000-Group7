@@ -1,5 +1,5 @@
 {
-  "model_run_id": "5dac9643-8ebf-4913-b307-eee3b672478b",
+  "model_run_id": "963b298f-de7e-4566-b5d4-f865f7365015",
   "data_release_version": {
     "release_name": "quantum-data-core",
     "release_date": "2026-08-05",
@@ -7,9 +7,9 @@
   },
   "input_table_hashes": {
     "ml_syndrome_decoder_example": "edbe27083c0a25f38efef5b72310e0250baa0cea51baa9f8f6d4c10a7e3b8f4d",
-    "ml_google_decoder_example": "03fa4b9c13479464df4a3c6e128004c606bb3e7482a36a79b250dfa66eee822e"
+    "ml_google_decoder_example": "de843cd359f5251404fedf255d6efc97b550c92faa93319d6ffd1f62aec00fee"
   },
-  "code_revision": "8fa9a4f7bb2d7a1cf00663f38f53cac011480f98",
+  "code_revision": "eee928ec6a3ac2a4eb627c460745b7e1a4cc49c0",
   "dependency_versions": {
     "scikit-learn": "1.9.0",
     "pandas": "2.3.1",
@@ -51,20 +51,20 @@
   "timings": {
     "task_a": {
       "task_a_weighted_prior_baseline": {
-        "training_time_seconds": 0.0028204917907714844,
-        "prediction_time_seconds": 0.0008618831634521484
+        "training_time_seconds": 0.0026013851165771484,
+        "prediction_time_seconds": 0.0008645057678222656
       },
       "task_a_weighted_logistic_regression": {
-        "training_time_seconds": 0.1896684169769287,
-        "prediction_time_seconds": 0.0017969608306884766
+        "training_time_seconds": 0.26414966583251953,
+        "prediction_time_seconds": 0.0018420219421386719
       }
     },
     "task_b": {
       "task_b_combined_logistic_regression": {
-        "training_time_seconds": 0.14995384216308594,
-        "prediction_time_seconds": 0.14321589469909668
+        "training_time_seconds": 0.21721744537353516,
+        "prediction_time_seconds": 0.13825726509094238
       }
     },
-    "total_run_seconds": 8.993110418319702
+    "total_run_seconds": 9.198691129684448
   }
 }

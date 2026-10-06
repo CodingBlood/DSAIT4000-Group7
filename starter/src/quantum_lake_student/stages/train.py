@@ -17,6 +17,7 @@ from sklearn.metrics import balanced_accuracy_score, brier_score_loss
 from quantum_lake_student.ml import google_meta_model_input, syndrome_model_input
 from quantum_lake_student.models import StageResult
 from quantum_lake_student.ml import weighted_logical_error_rate
+from quantum_lake_student.pipeline_utils import PipelineError, write_parquet
 import time
 
 SYNDROME_PATH = "ml/ml_syndrome_decoder_example.parquet"
@@ -26,6 +27,8 @@ SEED = 7
 
 
 def data_release_version() -> dict:
+    if not os.path.exists(MANIFEST_PATH):
+        raise PipelineError(f"Release manifest {MANIFEST_PATH} not found. Check that the course data is mounted.")
     with open(MANIFEST_PATH) as f:
         manifest = json.load(f)
     return {
@@ -151,6 +154,9 @@ def run(model_run_id: str) -> StageResult:
 
     os.makedirs("results/part2/models", exist_ok=True)
 
+    for path in [GOOGLE_PATH, SYNDROME_PATH]:
+        if not os.path.exists(path):
+            raise PipelineError(f"ML table {path} not found. Run make run before make train.")
     df_google_ml = pd.read_parquet(GOOGLE_PATH)
     df_syndrome_ml = pd.read_parquet(SYNDROME_PATH)
 
@@ -170,7 +176,7 @@ def run(model_run_id: str) -> StageResult:
         for p in task_b_result["predictions"]
     ]
     df_predictions = pd.DataFrame(task_a_result["predictions"] + task_b_rows)
-    df_predictions.to_parquet("results/part2/predictions.parquet", index=False)
+    write_parquet(df_predictions, "results/part2/predictions.parquet")
 
     with open("results/part2/metrics.json", "w") as f:
         json.dump({"task_a": task_a_result["metrics"], "task_b": task_b_result["metrics"]}, f, indent=2)

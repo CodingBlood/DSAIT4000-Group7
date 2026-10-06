@@ -9,6 +9,7 @@ Student responsibilities:
 - make a second run safe: no duplicate source records.
 """
 import hashlib
+import io
 import json
 import os
 import zipfile
@@ -16,9 +17,12 @@ import zipfile
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import minio_client, bronze_inventory
 from quantum_lake_student.models import StageResult
+from quantum_lake_student.pipeline_utils import PipelineError
 
 def load_expected_manifest() -> dict:
     manifest_path = "/course-data/metadata/bundle-manifest.json"
+    if not os.path.exists(manifest_path):
+        raise PipelineError(f"Release manifest {manifest_path} not found. Check that the course data is mounted.")
     with open(manifest_path) as f:
         manifest = json.load(f)
     return {
@@ -45,7 +49,7 @@ def run(run_id: str) -> StageResult:
     unexpected = actual_keys - expected_keys
 
     if missing:
-        raise FileNotFoundError(f"Missing expected Bronze objects: {missing}")
+        raise PipelineError(f"Missing expected Bronze objects: {sorted(missing)}. Run make seed to load them.")
     if unexpected:
         print(f"Warning: unexpected objects in Bronze, not in manifest: {unexpected}")
 
@@ -61,20 +65,24 @@ def run(run_id: str) -> StageResult:
         actual_size = len(raw_bytes)
 
         if actual_hash != info["sha256"]:
-            raise ValueError(
-                f"Checksum mismatch for {key}: "
-                f"expected {info['sha256']}, got {actual_hash}"
+            raise PipelineError(
+                f"Bronze object {key} is changed or damaged: "
+                f"expected sha256 {info['sha256']}, got {actual_hash}"
             )
         if actual_size != info["bytes"]:
-            raise ValueError(
-                f"Size mismatch for {key}: "
+            raise PipelineError(
+                f"Bronze object {key} has the wrong size: "
                 f"expected {info['bytes']} bytes, got {actual_size}"
             )
 
-        with zipfile.ZipFile(__import__("io").BytesIO(raw_bytes)) as z:
+        try:
+            archive = zipfile.ZipFile(io.BytesIO(raw_bytes))
+        except zipfile.BadZipFile:
+            raise PipelineError(f"Bronze object {key} is not a readable zip archive")
+        with archive as z:
             unsafe_members = [n for n in z.namelist() if not is_safe_member(n)]
             if unsafe_members:
-                raise ValueError(f"Unsafe archive member paths in {key}: {unsafe_members}")
+                raise PipelineError(f"Unsafe archive member paths in {key}: {unsafe_members}")
             member_count = len(z.namelist())
 
         registry_rows.append({
