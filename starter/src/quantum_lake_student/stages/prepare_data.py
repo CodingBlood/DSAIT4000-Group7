@@ -18,7 +18,8 @@ import re
 from quantum_lake_student.models import StageResult
 from quantum_lake_student.connections import minio_client 
 from quantum_lake_student.config import Settings # connection details for pipeline
-from quantum_lake_student.formats import iter_b8_records, parse_01_records
+from quantum_lake_student.formats import parse_01_records
+from quantum_lake_student.pipeline_utils import PipelineError, write_parquet
 
 def fetch_bronze_bytes(settings, key: str) -> bytes:
     client = minio_client(settings)
@@ -30,6 +31,23 @@ def fetch_bronze_bytes(settings, key: str) -> bytes:
 
 class GoogleQecUtility:
     BRONZE_KEY = "bronze/source=google_qec/google-surface-code-curated.zip"
+    REQUIRED_SHOT_FILES = [
+        "properties.yml",
+        "measurements.b8",
+        "detection_events.b8",
+        "obs_flips_actual.01",
+        "obs_flips_predicted_by_belief_matching.01",
+        "obs_flips_predicted_by_correlated_matching.01",
+        "obs_flips_predicted_by_pymatching.01",
+        "obs_flips_predicted_by_tensor_network_contraction.01",
+    ]
+    TRACE_COLUMNS = ["source_record_id", "source_name", "bronze_object", "archive_member", "record_locator", "input_sha256"]
+    SHOT_COLUMNS = [
+        "source_record_id", "experiment_id", "shot_index", "measurement_bits", "sweep_bits",
+        "detector_bits", "detector_event_count", "actual_observable_flip",
+        "belief_matching_prediction", "correlated_matching_prediction",
+        "pymatching_prediction", "tensor_network_contraction_prediction",
+    ]
 
     def __init__(self):
         super()
@@ -59,161 +77,180 @@ class GoogleQecUtility:
         return yaml.safe_load(raw) if raw else {}
 
     @staticmethod
-    def read_b8_records(
-            raw_bytes: bytes, member_name: str, bits_per_record: int
-    ) -> list[tuple[int, ...]]:
+    def read_b8_rows(raw_bytes: bytes, member_name: str, bit_count: int) -> list[bytes] | None:
         raw = GoogleQecUtility.read_zip_member_bytes(raw_bytes, member_name)
-        if not raw or bits_per_record == 0:
+        if bit_count == 0:
             return []
-        return list(iter_b8_records(raw, bits_per_record=bits_per_record))
+        record_size = (bit_count + 7) // 8
+        if len(raw) % record_size != 0:
+            return None
+        rows = []
+        for start in range(0, len(raw), record_size):
+            rows.append(raw[start:start + record_size])
+        return rows
 
     @staticmethod
-    def read_01_records(raw_bytes: bytes, member_name: str) -> list[int]:
+    def read_01_records(raw_bytes: bytes, member_name: str) -> list[int] | None:
         raw = GoogleQecUtility.read_zip_member_bytes(raw_bytes, member_name)
-        if not raw:
-            return []
-        return parse_01_records(raw)
+        try:
+            return parse_01_records(raw)
+        except ValueError:
+            return None
 
     @staticmethod
-    def check_equal_lengths(**named_lists) -> bool:
-
-        active_lists = {
-            name: lst for name, lst in named_lists.items() if len(lst) > 0
-        }  # we removed empty lists
-        lengths = {name: len(lst) for name, lst in active_lists.items()}
-        unique_lengths = set(lengths.values())
-        if len(unique_lengths) == 1:
-            print(
-                f"OK: all {len(active_lists)} active lists have length"
-                f" {unique_lengths.pop()}"
-            )
+    def padding_is_zero(record: bytes, bit_count: int) -> bool:
+        used_bits = bit_count % 8
+        if used_bits == 0 or len(record) == 0:
             return True
-        print("MISMATCH in lengths:")
-        for name, length in lengths.items():
-            print(f"  {name}: {length}")
-        return False
+        return record[-1] >> used_bits == 0
 
     @staticmethod
-    def count_set_bits(bit_tuple: tuple[int, ...]) -> int:
-        return sum(bit_tuple)
+    def count_set_bits_in_bytes(record: bytes) -> int:
+        count = 0
+        for value in record:
+            count += value.bit_count()
+        return count
 
     @staticmethod
-    def pack_bits_to_bytes(bit_tuple: tuple[int, ...]) -> bytes:
-        num_bytes = (len(bit_tuple) + 7) // 8
-        out = bytearray(num_bytes)
-        for bit_index, bit in enumerate(bit_tuple):
-            if bit:
-                out[bit_index // 8] |= 1 << (bit_index % 8)
-        return bytes(out)
+    def shot_issue(exp_id: str, source_record_id, rule_id: str, observed_value: str, reason: str) -> dict:
+        issue_key = f"{exp_id}:{source_record_id}:{rule_id}"
+        return {
+            "issue_id": "issue_" + hashlib.md5(issue_key.encode()).hexdigest()[:12],
+            "source_record_id": source_record_id,
+            "rule_id": rule_id,
+            "severity": "error",
+            "observed_value": observed_value,
+            "action": "rejected",
+            "reason": reason,
+        }
 
     @staticmethod
-    def build_shot_rows(raw_bytes: bytes, folder: str) -> list[dict]:
-        properties = GoogleQecUtility.read_zip_member_yaml(
-            raw_bytes, f"{folder}/properties.yml"
-        )
-
-        measurements = GoogleQecUtility.read_b8_records(
-            raw_bytes,
-            f"{folder}/measurements.b8",
-            properties.get("circuit_measurements", 0),
-        )
-        detections = GoogleQecUtility.read_b8_records(
-            raw_bytes,
-            f"{folder}/detection_events.b8",
-            properties.get("circuit_detectors", 0),
-        )
-        sweeps = GoogleQecUtility.read_b8_records(
-            raw_bytes,
-            f"{folder}/sweep.b8",
-            properties.get("circuit_sweep_bits", 0),
-        )
-
-        actual_flips = GoogleQecUtility.read_01_records(
-            raw_bytes, f"{folder}/obs_flips_actual.01"
-        )
-        belief = GoogleQecUtility.read_01_records(
-            raw_bytes,
-            f"{folder}/obs_flips_predicted_by_belief_matching.01",
-        )
-        correlated = GoogleQecUtility.read_01_records(
-            raw_bytes,
-            f"{folder}/obs_flips_predicted_by_correlated_matching.01",
-        )
-        pymatching = GoogleQecUtility.read_01_records(
-            raw_bytes, f"{folder}/obs_flips_predicted_by_pymatching.01"
-        )
-        tensor_net = GoogleQecUtility.read_01_records(
-            raw_bytes,
-            f"{folder}/obs_flips_predicted_by_tensor_network_contraction.01",
-        )
-
-        # ok = GoogleQecUtility.check_equal_lengths(
-        #     measurements=measurements,
-        #     detections=detections,
-        #     sweeps=sweeps,
-        #     actual_flips=actual_flips,
-        #     belief=belief,
-        #     correlated=correlated,
-        #     pymatching=pymatching,
-        #     tensor_net=tensor_net,
-        # )
-        # if not ok:
-        #     raise ValueError(f"Companion file length mismatch in {folder}")
-
+    def build_shot_rows(raw_bytes: bytes, folder: str, accepted_experiment_ids: set):
         exp_id = f"google_{folder}"
+        shot_rows = []
+        trace_rows = []
+        issue_rows = []
 
-        archive = hashlib.sha256(raw_bytes).hexdigest()  # proof of the version
+        if exp_id not in accepted_experiment_ids:
+            issue_rows.append(GoogleQecUtility.shot_issue(
+                exp_id, None, "google_shot_experiment_accepted", f"folder={folder}",
+                "experiment was rejected, so its shots are not published",
+            ))
+            return shot_rows, trace_rows, issue_rows, 0
 
-        trace_rows = []  # storage for trace table
-        shot_rows = []  # storage for shot rows
-        for shot_index in range(len(actual_flips)):
+        properties = GoogleQecUtility.read_zip_member_yaml(raw_bytes, f"{folder}/properties.yml")
+        declared_shots = int(properties["shots"])
+        measurement_bit_count = int(properties["circuit_measurements"])
+        detector_bit_count = int(properties["circuit_detectors"])
+        sweep_bit_count = int(properties.get("circuit_sweep_bits", 0))
+
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            members = set(z.namelist())
+        required_files = list(GoogleQecUtility.REQUIRED_SHOT_FILES)
+        if sweep_bit_count > 0:
+            required_files.append("sweep.b8")
+        for file_name in required_files:
+            if f"{folder}/{file_name}" not in members:
+                raise PipelineError(f"Required companion file {folder}/{file_name} is missing from the Google archive")
+
+        measurements = GoogleQecUtility.read_b8_rows(raw_bytes, f"{folder}/measurements.b8", measurement_bit_count)
+        detections = GoogleQecUtility.read_b8_rows(raw_bytes, f"{folder}/detection_events.b8", detector_bit_count)
+        sweeps = GoogleQecUtility.read_b8_rows(raw_bytes, f"{folder}/sweep.b8", sweep_bit_count)
+        actual_flips = GoogleQecUtility.read_01_records(raw_bytes, f"{folder}/obs_flips_actual.01")
+        belief = GoogleQecUtility.read_01_records(raw_bytes, f"{folder}/obs_flips_predicted_by_belief_matching.01")
+        correlated = GoogleQecUtility.read_01_records(raw_bytes, f"{folder}/obs_flips_predicted_by_correlated_matching.01")
+        pymatching = GoogleQecUtility.read_01_records(raw_bytes, f"{folder}/obs_flips_predicted_by_pymatching.01")
+        tensor_net = GoogleQecUtility.read_01_records(raw_bytes, f"{folder}/obs_flips_predicted_by_tensor_network_contraction.01")
+
+        files = {
+            "measurements.b8": measurements,
+            "detection_events.b8": detections,
+            "obs_flips_actual.01": actual_flips,
+            "obs_flips_predicted_by_belief_matching.01": belief,
+            "obs_flips_predicted_by_correlated_matching.01": correlated,
+            "obs_flips_predicted_by_pymatching.01": pymatching,
+            "obs_flips_predicted_by_tensor_network_contraction.01": tensor_net,
+        }
+        if sweep_bit_count > 0:
+            files["sweep.b8"] = sweeps
+
+        for file_name, records in files.items():
+            if records is None:
+                issue_rows.append(GoogleQecUtility.shot_issue(
+                    exp_id, None, "google_shot_file_format", f"{folder}/{file_name}",
+                    "b8 file is not a whole number of records, or 01 file has a value other than 0 or 1",
+                ))
+        if len(issue_rows) > 0:
+            return shot_rows, trace_rows, issue_rows, declared_shots
+
+        lengths_match = True
+        for records in files.values():
+            if len(records) != declared_shots:
+                lengths_match = False
+        if not lengths_match:
+            observed = []
+            for file_name, records in files.items():
+                observed.append(f"{file_name}={len(records)}")
+            issue_rows.append(GoogleQecUtility.shot_issue(
+                exp_id, None, "google_shot_companion_lengths", f"shots={declared_shots}; " + ", ".join(observed),
+                "companion files do not all contain the declared number of shots, so shots cannot be aligned",
+            ))
+            return shot_rows, trace_rows, issue_rows, declared_shots
+
+        archive = hashlib.sha256(raw_bytes).hexdigest()
+        accepted_ids = []
+        accepted_locators = []
+        for shot_index in range(declared_shots):
             shot_rec_id = f"google_shot_{hashlib.md5(f'{exp_id}_{shot_index}'.encode()).hexdigest()[:12]}"
+            measurement_record = measurements[shot_index]
+            detector_record = detections[shot_index]
+            sweep_record = b""
+            if sweep_bit_count > 0:
+                sweep_record = sweeps[shot_index]
+
+            bad_padding = []
+            if not GoogleQecUtility.padding_is_zero(measurement_record, measurement_bit_count):
+                bad_padding.append(f"measurements.b8 last byte={measurement_record[-1]}")
+            if not GoogleQecUtility.padding_is_zero(detector_record, detector_bit_count):
+                bad_padding.append(f"detection_events.b8 last byte={detector_record[-1]}")
+            if not GoogleQecUtility.padding_is_zero(sweep_record, sweep_bit_count):
+                bad_padding.append(f"sweep.b8 last byte={sweep_record[-1]}")
+            if len(bad_padding) > 0:
+                issue_rows.append(GoogleQecUtility.shot_issue(
+                    exp_id, shot_rec_id, "google_shot_b8_padding_zero", "; ".join(bad_padding),
+                    "unused padding bits after the last real bit must be zero",
+                ))
+                continue
+
             shot_rows.append(
                 {
                     "source_record_id": shot_rec_id,
                     "experiment_id": exp_id,
                     "shot_index": shot_index,
-                    "measurement_bits": GoogleQecUtility.pack_bits_to_bytes(
-                        measurements[shot_index]
-                    ),
-                    "sweep_bits": (
-                        GoogleQecUtility.pack_bits_to_bytes(sweeps[shot_index])
-                        if sweeps
-                        else b""
-                    ),
-                    "detector_bits": GoogleQecUtility.pack_bits_to_bytes(
-                        detections[shot_index]
-                    ),
-                    "detector_event_count": GoogleQecUtility.count_set_bits(
-                        detections[shot_index]
-                    ),
+                    "measurement_bits": measurement_record,
+                    "sweep_bits": sweep_record,
+                    "detector_bits": detector_record,
+                    "detector_event_count": GoogleQecUtility.count_set_bits_in_bytes(detector_record),
                     "actual_observable_flip": bool(actual_flips[shot_index]),
-                    "belief_matching_prediction": (
-                        bool(belief[shot_index]) if belief else False
-                    ),
-                    "correlated_matching_prediction": (
-                        bool(correlated[shot_index]) if correlated else False
-                    ),
-                    "pymatching_prediction": (
-                        bool(pymatching[shot_index]) if pymatching else False
-                    ),
-                    "tensor_network_contraction_prediction": (
-                        bool(tensor_net[shot_index]) if tensor_net else False
-                    ),
+                    "belief_matching_prediction": bool(belief[shot_index]),
+                    "correlated_matching_prediction": bool(correlated[shot_index]),
+                    "pymatching_prediction": bool(pymatching[shot_index]),
+                    "tensor_network_contraction_prediction": bool(tensor_net[shot_index]),
                 }
             )
+            accepted_ids.append(shot_rec_id)
+            accepted_locators.append(f"shot_index={shot_index}")
 
-            trace_rows.append(
-                {
-                    "source_record_id": shot_rec_id,
-                    "source_name": "google_qec",
-                    "bronze_object": "bronze/source=google_qec/google-surface-code-curated.zip",
-                    "archive_member": folder,
-                    "record_locator": f"shot_index={shot_index}",
-                    "input_sha256": archive,
-                }
-            )
-        return shot_rows, trace_rows
+        for file_name in files:
+            trace_rows.append(pd.DataFrame({
+                "source_record_id": accepted_ids,
+                "source_name": "google_qec",
+                "bronze_object": GoogleQecUtility.BRONZE_KEY,
+                "archive_member": f"{folder}/{file_name}",
+                "record_locator": accepted_locators,
+                "input_sha256": archive,
+            }))
+        return shot_rows, trace_rows, issue_rows, declared_shots
 
     @staticmethod
     def build_experiment_rows(raw_bytes: bytes, folder: str) -> list[dict]:
@@ -316,16 +353,22 @@ class GoogleQecUtility:
         return experiment_df, trace_df, issues_df, len(folders)
 
     @staticmethod
-    def google_shots_table(raw_bytes: bytes):
+    def google_shots_table(raw_bytes: bytes, accepted_experiment_ids: set):
         folders = GoogleQecUtility.list_zip_folders(raw_bytes)
         all_shot_rows = []
         all_trace_rows = []
+        all_issue_rows = []
+        shots_read = 0
         for folder in folders:
-            shot_rows, trace_rows = GoogleQecUtility.build_shot_rows(raw_bytes, folder)
+            shot_rows, trace_rows, issue_rows, declared_shots = GoogleQecUtility.build_shot_rows(
+                raw_bytes, folder, accepted_experiment_ids
+            )
             all_shot_rows.extend(shot_rows)
             all_trace_rows.extend(trace_rows)
+            all_issue_rows.extend(issue_rows)
+            shots_read += declared_shots
 
-        shot_df = pd.DataFrame(all_shot_rows).astype(
+        shot_df = pd.DataFrame(all_shot_rows, columns=GoogleQecUtility.SHOT_COLUMNS).astype(
             {
                 "source_record_id": "string",
                 "experiment_id": "string",
@@ -341,9 +384,14 @@ class GoogleQecUtility:
                 "tensor_network_contraction_prediction": "bool",
             }
         )
-        trace_df = pd.DataFrame(all_trace_rows)
-
-        return shot_df, trace_df, len(all_shot_rows)
+        trace_df = pd.DataFrame(columns=GoogleQecUtility.TRACE_COLUMNS)
+        if len(all_trace_rows) > 0:
+            trace_df = pd.concat(all_trace_rows, ignore_index=True)
+        issues_df = pd.DataFrame(
+            all_issue_rows,
+            columns=["issue_id", "source_record_id", "rule_id", "severity", "observed_value", "action", "reason"],
+        )
+        return shot_df, trace_df, issues_df, shots_read
 
 
 class QasmBenchUtility:
@@ -1176,8 +1224,10 @@ def run(run_id: str) -> StageResult:
     # google_qec
     google_raw = fetch_bronze_bytes(settings, GoogleQecUtility.BRONZE_KEY)
     df_exp, df_trace_experiment, df_issues_experiment, exp_dirs = GoogleQecUtility.google_experiment_table(google_raw)
-    df_shot, df_trace_shots, shot_count = GoogleQecUtility.google_shots_table(google_raw)
-    df_issues_shots = pd.DataFrame(columns=issues_columns)  # 0 rows right now -- nothing was rejected in shot table
+    accepted_experiment_ids = set()
+    if not df_exp.empty:
+        accepted_experiment_ids = set(df_exp["experiment_id"])
+    df_shot, df_trace_shots, df_issues_shots, shot_count = GoogleQecUtility.google_shots_table(google_raw, accepted_experiment_ids)
 
 
     # QEC_Syndromes
@@ -1205,14 +1255,14 @@ def run(run_id: str) -> StageResult:
     df_issues["run_id"] = run_id
 
 
-    df_exp.reset_index(drop=True).to_parquet("silver/google_qec/experiment.parquet", index=False)
-    df_shot.reset_index(drop=True).to_parquet("silver/google_qec/shot.parquet", index=False)
-    df_trace.reset_index(drop=True).to_parquet("results/part1/source_trace.parquet", index=False)
-    df_issues.reset_index(drop=True).to_parquet("results/part1/data_issues.parquet", index=False)
-    df_syn.reset_index(drop=True).to_parquet("silver/qec_syndromes/syndrome_observation.parquet", index=False)
-    df_correction.reset_index(drop=True).to_parquet("silver/qasmbench/conditional_correction.parquet", index=False)
-    df_circuit.reset_index(drop=True).to_parquet("silver/qasmbench/circuit.parquet", index=False)
-    df_stabilizer.reset_index(drop=True).to_parquet("silver/qasmbench/stabilizer_check.parquet", index=False)
+    write_parquet(df_exp.reset_index(drop=True), "silver/google_qec/experiment.parquet")
+    write_parquet(df_shot.reset_index(drop=True), "silver/google_qec/shot.parquet")
+    write_parquet(df_trace.reset_index(drop=True), "results/part1/source_trace.parquet")
+    write_parquet(df_issues.reset_index(drop=True), "results/part1/data_issues.parquet")
+    write_parquet(df_syn.reset_index(drop=True), "silver/qec_syndromes/syndrome_observation.parquet")
+    write_parquet(df_correction.reset_index(drop=True), "silver/qasmbench/conditional_correction.parquet")
+    write_parquet(df_circuit.reset_index(drop=True), "silver/qasmbench/circuit.parquet")
+    write_parquet(df_stabilizer.reset_index(drop=True), "silver/qasmbench/stabilizer_check.parquet")
 
     row_counts = {
         "experiment": {"read": exp_dirs, "accepted": len(df_exp), "rejected": exp_dirs - len(df_exp)},

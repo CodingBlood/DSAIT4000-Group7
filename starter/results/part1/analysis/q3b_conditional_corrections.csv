@@ -1,0 +1,7 @@
+benchmark_name,variant,condition_register,condition_value,checks_that_fired,gate,target_qubit
+qec_sm_n5,source,syn,1,a[0],x,q[0]
+qec_sm_n5,source,syn,2,a[1],x,q[2]
+qec_sm_n5,source,syn,3,"a[0], a[1]",x,q[1]
+qec_sm_n5,transpiled,syn,1,a[0],x,q[0]
+qec_sm_n5,transpiled,syn,2,a[1],x,q[2]
+qec_sm_n5,transpiled,syn,3,"a[0], a[1]",x,q[1]

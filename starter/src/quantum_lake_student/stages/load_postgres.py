@@ -13,6 +13,7 @@ import hashlib
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import postgres_connection
 from quantum_lake_student.models import StageResult
+from quantum_lake_student.pipeline_utils import PipelineError
 
 DECODER_COLUMNS = {
     "belief_matching_prediction": "belief_matching",
@@ -162,14 +163,19 @@ CREATE INDEX IF NOT EXISTS idx_check_circuit ON stabilizer_check(circuit_id);
 CREATE INDEX IF NOT EXISTS idx_corr_circuit ON conditional_correction(circuit_id);
 """
 
+def copy_rows(cur, table: str, columns: list[str], rows: list) -> None:
+    column_text = ", ".join(columns)
+    with cur.copy(f"COPY {table} ({column_text}) FROM STDIN") as copy:
+        for row in rows:
+            copy.write_row(row)
+
+
 def load_experiment(cur, df_exp: pd.DataFrame) -> int:
-    cur.executemany(
-        """
-        INSERT INTO experiment (
-            experiment_id, source_record_id, basis, distance, rounds, shots,
-            center_row, center_col, measurement_count, detector_count
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+    copy_rows(
+        cur,
+        "experiment",
+        ["experiment_id", "source_record_id", "basis", "distance", "rounds", "shots",
+         "center_row", "center_col", "measurement_count", "detector_count"],
         [
             (
                 row.experiment_id,
@@ -189,22 +195,19 @@ def load_experiment(cur, df_exp: pd.DataFrame) -> int:
     return len(df_exp)
 
 def load_decoders(cur) -> int:
-    cur.executemany(
-        "INSERT INTO decoder (decoder_id, decoder_name) VALUES (%s, %s) "
-        "ON CONFLICT (decoder_id) DO NOTHING",
-        [(decoder_id, decoder_id) for decoder_id in DECODER_COLUMNS.values()],
-    )
+    decoder_rows = []
+    for decoder_id in DECODER_COLUMNS.values():
+        decoder_rows.append((decoder_id, decoder_id))
+    copy_rows(cur, "decoder", ["decoder_id", "decoder_name"], decoder_rows)
     return len(DECODER_COLUMNS)
 
 def load_shots(cur, df_shots: pd.DataFrame) -> tuple[int, int]:
-    cur.executemany(
-        """
-        INSERT INTO shot (
-            shot_id, source_record_id, experiment_id, shot_index,
-            measurement_bits, sweep_bits, detector_bits,
-            detector_event_count, actual_observable_flip
-        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """,
+    copy_rows(
+        cur,
+        "shot",
+        ["shot_id", "source_record_id", "experiment_id", "shot_index",
+         "measurement_bits", "sweep_bits", "detector_bits",
+         "detector_event_count", "actual_observable_flip"],
         [
             (
                 row.source_record_id,
@@ -228,38 +231,34 @@ def load_shots(cur, df_shots: pd.DataFrame) -> tuple[int, int]:
                 (row.source_record_id, decoder_id, bool(getattr(row, column)))
             )
 
-    cur.executemany(
-        """
-        INSERT INTO shot_prediction (shot_id, decoder_id, predicted_flip)
-        VALUES (%s, %s, %s)
-        """,
-        prediction_rows,
-    )
+    copy_rows(cur, "shot_prediction", ["shot_id", "decoder_id", "predicted_flip"], prediction_rows)
 
     return len(df_shots), len(prediction_rows)
 
 def load_syndromes(cur, df_syn: pd.DataFrame) -> None:
     experiments = df_syn[["experiment_id", "physical_fault_rate"]].drop_duplicates("experiment_id")
     experiments["distance"] = experiments["experiment_id"].str.extract(r"_d(\d+)_").astype(int)
-    cur.executemany(
-        "INSERT INTO syndrome_experiment (experiment_id, distance, physical_fault_rate) VALUES (%s, %s, %s)",
-        list(experiments[["experiment_id", "distance", "physical_fault_rate"]].itertuples(index=False, name=None)),
-    )
+    experiment_rows = []
+    for r in experiments.itertuples():
+        experiment_rows.append((r.experiment_id, int(r.distance), float(r.physical_fault_rate)))
+    copy_rows(cur, "syndrome_experiment", ["experiment_id", "distance", "physical_fault_rate"], experiment_rows)
 
     df_syn = df_syn.copy()
     df_syn["pattern_id"] = df_syn["syndrome_bits"].apply(lambda b: f"pat_{hashlib.md5(b).hexdigest()[:12]}")
     patterns = df_syn[["pattern_id", "syndrome_bits", "round_count", "check_count"]].drop_duplicates("pattern_id")
-    cur.executemany(
-        "INSERT INTO syndrome_pattern (pattern_id, syndrome_bits, round_count, check_count) "
-        "VALUES (%s, %s, %s, %s) ON CONFLICT (pattern_id) DO NOTHING",
-        [(r.pattern_id, bytes(r.syndrome_bits), int(r.round_count), int(r.check_count)) for r in patterns.itertuples()],
-    )
+    pattern_rows = []
+    for r in patterns.itertuples():
+        pattern_rows.append((r.pattern_id, bytes(r.syndrome_bits), int(r.round_count), int(r.check_count)))
+    copy_rows(cur, "syndrome_pattern", ["pattern_id", "syndrome_bits", "round_count", "check_count"], pattern_rows)
 
-    cur.executemany(
-        "INSERT INTO syndrome_observation (source_record_id, experiment_id, pattern_id, logical_error_label, quantity) "
-        "VALUES (%s, %s, %s, %s, %s)",
-        [(r.source_record_id, r.experiment_id, r.pattern_id, bool(r.logical_error_label), int(r.quantity))
-         for r in df_syn.itertuples()],
+    observation_rows = []
+    for r in df_syn.itertuples():
+        observation_rows.append((r.source_record_id, r.experiment_id, r.pattern_id, bool(r.logical_error_label), int(r.quantity)))
+    copy_rows(
+        cur,
+        "syndrome_observation",
+        ["source_record_id", "experiment_id", "pattern_id", "logical_error_label", "quantity"],
+        observation_rows,
     )
 def load_qasm(cur, df_circuit: pd.DataFrame, df_check: pd.DataFrame,
               df_corr: pd.DataFrame) -> None:
@@ -279,21 +278,20 @@ def load_qasm(cur, df_circuit: pd.DataFrame, df_check: pd.DataFrame,
                 for i in range(int(size)):
                     qubit_rows.append((r.circuit_id, f"{name}[{i}]", name, i))
  
-    cur.executemany(
-        "INSERT INTO circuit (circuit_id, source_record_id, benchmark_name, variant, "
-        "qubit_count, measurement_count, two_qubit_gate_count) VALUES (%s,%s,%s,%s,%s,%s,%s)",
+    copy_rows(
+        cur,
+        "circuit",
+        ["circuit_id", "source_record_id", "benchmark_name", "variant",
+         "qubit_count", "measurement_count", "two_qubit_gate_count"],
         circuit_rows,
     )
-    cur.executemany(
-        "INSERT INTO circuit_register (circuit_id, register_order, register_name, "
-        "register_type, register_size) VALUES (%s,%s,%s,%s,%s)",
+    copy_rows(
+        cur,
+        "circuit_register",
+        ["circuit_id", "register_order", "register_name", "register_type", "register_size"],
         register_rows,
     )
-    cur.executemany(
-        "INSERT INTO circuit_qubit (circuit_id, qubit_name, register_name, qubit_index) "
-        "VALUES (%s,%s,%s,%s)",
-        qubit_rows,
-    )
+    copy_rows(cur, "circuit_qubit", ["circuit_id", "qubit_name", "register_name", "qubit_index"], qubit_rows)
  
     # stabilizer_check and its data-qubit junction table
     check_rows, data_rows = [], []
@@ -308,27 +306,24 @@ def load_qasm(cur, df_circuit: pd.DataFrame, df_check: pd.DataFrame,
         for data_qubit in list(r.data_qubits):
             data_rows.append((r.circuit_id, r.check_id, str(data_qubit)))
  
-    cur.executemany(
-        "INSERT INTO stabilizer_check (circuit_id, check_id, source_record_id, "
-        "ancilla_qubit, syndrome_register, syndrome_index) VALUES (%s,%s,%s,%s,%s,%s)",
+    copy_rows(
+        cur,
+        "stabilizer_check",
+        ["circuit_id", "check_id", "source_record_id", "ancilla_qubit", "syndrome_register", "syndrome_index"],
         check_rows,
     )
-    cur.executemany(
-        "INSERT INTO stabilizer_check_data_qubit (circuit_id, check_id, data_qubit) "
-        "VALUES (%s,%s,%s)",
-        data_rows,
-    )
+    copy_rows(cur, "stabilizer_check_data_qubit", ["circuit_id", "check_id", "data_qubit"], data_rows)
  
     # conditional_correction
-    cur.executemany(
-        "INSERT INTO conditional_correction (source_record_id, circuit_id, "
-        "condition_register, condition_value, gate, target_qubit) "
-        "VALUES (%s,%s,%s,%s,%s,%s)",
-        [
-            (r.source_record_id, r.circuit_id, r.condition_register,
-             int(r.condition_value), r.gate, r.target_qubit)
-            for r in df_corr.itertuples()
-        ],
+    correction_rows = []
+    for r in df_corr.itertuples():
+        correction_rows.append((r.source_record_id, r.circuit_id, r.condition_register,
+                                int(r.condition_value), r.gate, r.target_qubit))
+    copy_rows(
+        cur,
+        "conditional_correction",
+        ["source_record_id", "circuit_id", "condition_register", "condition_value", "gate", "target_qubit"],
+        correction_rows,
     )
 def run(run_id: str) -> StageResult:
     result = StageResult(stage="load_postgres", run_id=run_id)
@@ -342,23 +337,9 @@ def run(run_id: str) -> StageResult:
     circuit_path = "silver/qasmbench/circuit.parquet"
     check_path = "silver/qasmbench/stabilizer_check.parquet"
     correction_path = "silver/qasmbench/conditional_correction.parquet"
-    if not os.path.exists(exp_path):
-        raise FileNotFoundError(
-            f"{exp_path} not found. Run the prepare_data stage first."
-        )
-    if not os.path.exists(shot_path):
-        raise FileNotFoundError(
-            f"{shot_path} not found. Run the prepare_data stage first."
-        )
-    if not os.path.exists(syndrome_path):
-        raise FileNotFoundError(
-            f"{syndrome_path} not found. Run the prepare_data stage first."
-        )
-    for path in (circuit_path, check_path, correction_path):
+    for path in [exp_path, shot_path, syndrome_path, circuit_path, check_path, correction_path]:
         if not os.path.exists(path):
-            raise FileNotFoundError(
-                f"{path} not found. Run the prepare_data stage first."
-            )
+            raise PipelineError(f"Silver file {path} not found. Run the prepare_data stage first.")
 
     df_exp = pd.read_parquet(exp_path)
     df_shots = pd.read_parquet(shot_path)

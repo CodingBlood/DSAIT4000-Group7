@@ -1,0 +1,37 @@
+{
+  "experiment": {
+    "read": 5,
+    "accepted": 5,
+    "rejected": 0
+  },
+  "shot": {
+    "read": 250000,
+    "accepted": 250000,
+    "rejected": 0
+  },
+  "syndrome_observation": {
+    "read": 75598,
+    "accepted": 75598,
+    "rejected": 0
+  },
+  "conditional_correction": {
+    "read": 6,
+    "accepted": 6,
+    "rejected": 0
+  },
+  "circuit": {
+    "read": 6,
+    "accepted": 6,
+    "rejected": 0
+  },
+  "stabilizer_check": {
+    "read": 4,
+    "accepted": 4,
+    "rejected": 0
+  },
+  "gold_load": {
+    "read": 325619,
+    "accepted": 325619,
+    "rejected": 0
+  }
+}
