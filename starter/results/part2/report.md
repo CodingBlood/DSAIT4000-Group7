@@ -57,15 +57,18 @@ erDiagram
 ### The pipeline and data flow
 
 The architecture used is aligned with the with the quantum_lake_student stages.
-When running the pipline, everythong starts in cli.py. The bronze sources are being fetched from the MinIO, which are being verified (register_sources.py). After the data sources have been verified, the run proceeds to the second and also biggest stage, which implies cleaning and generating silver schema for all thee bronze resources. This happens in prepare_data.py, where all the required data is being extracted from the bronze sources, checked for consistency, and appended into the corresponding silver stage table. In addition to that a shared tracing table is generated as well, covering the mapping of every Silver table back to bronze. Upon completion of all the 6 silver tables, the golden schema is getting generated in the load_postgres.py stage, where the tables are being generated (with keys, constraints, and indexes) and filled in with the data from the silver stage. 
+When running the pipeline, everything starts in cli.py. The bronze sources are being fetched from the MinIO, which are being verified (register_sources.py). After the data sources have been verified, the run proceeds to the second and also biggest stage, which implies cleaning and generating silver schema for all three bronze resources. This happens in prepare_data.py, where all the required data is being extracted from the bronze sources, checked for consistency, and appended into the corresponding silver stage table. In addition to that a shared tracing table is generated as well, covering the mapping of every Silver table back to bronze. Upon completion of all the 6 silver tables, the golden schema is getting generated in the load_postgres.py stage, where the tables are being generated (with keys, constraints, and indexes) and filled in with the data from the silver stage. 
 
 ### Source discovery - Google qec 
 The google_surface_code contains of 5 directories, with each individual one having properties.yml, a metadata file corresponding with the google experiment tables for the Silver stage. 
 
-Each experiment row is identified by **experiment_id** and a **source_record_id** which links back to its properties.yml file. Every row represent an experiment in a particular chip region (center row/col), how for a particular property measurement (basis) and error protection (code distance) measurement cycle was performed for how many runs (shots) And within that shot how many times (rounds) the cycle was performed. it also records the number of raw readout bits per shot (measurement_count) and the final count of detector-event bits per shot (detector_count).
+Each experiment row is identified by **experiment_id** and a **source_record_id** which links back to its properties.yml file. Every row represent an experiment in a particular chip region (center row/col), how for a particular measurement (basis) and error protection (code distance) measurement cycle was performed for how many runs (shots) And within that shot how many times (rounds) the cycle was performed. it also records the number of raw readout bits per shot (measurement_count) and the final count of detector-event bits per shot (detector_count).
 
 Each experiment has many shots, implying one-to-many relationship used in the Gold schema.
 
+### Source discovery - Syndrome
+
+### Source discovery - QASMBench
 
 ## sample trace
 
@@ -78,7 +81,7 @@ An example of the google_experiment trace can be found in trace_examples.json. I
 
 **Gold**: gold_shot is being read based on shot_id from the ML stage, which includes source_record_id, linking back to Silver and Bronze stage. The experiment row is read using experiment_id of the shot, which has its own source_record_id. Also, each individual prediction is fetched based on shot_id. 
 
-**Silver**: The experiment and shot parquet tables are being filtered based on the source_record_id from the golden schema of experiment and shot rows.
+**Silver**: The experiment and shot parquet tables are being filtered based on the source_record_id from the golden schema of experiment and shot rows. 
 
 **Bronze**: For Bronze, the same source_record_id value is used to find the corresponding rows in the shared source trace table
 
@@ -96,20 +99,36 @@ This shows the desired trace, by explicitly extracting the keys and foreign keys
 
 ## Quality findings 
 
-results/part1/row_counts.json reports for the experiment and shot table the read/accepted/rejected row counts. Before that, any corrupted or incomplete experiment folder would be silently accepted. After the fix, any missing or incomplete file is correctly excluded, counted and rejected, which corresponds with the reflected number in counts.json.
+results/part1/row_counts.json reports for the experiment and shot table the read/accepted/rejected row counts. Before that, any corrupted or incomplete experiment folder would be silently accepted. After the fix, any missing or incomplete file is correctly excluded, counted and rejected, which corresponds with the reflected number in row_counts.json. Any discrepancies are written into data_issues.parquet
+
+Here are the overall counts for each of the 6 tables
+
+| Table | Read | Accepted | Rejected |
+|---|---|---|---|
+| experiment | 5 | 5 | 0 |
+| shot | 250,000 | 250,000 | 0 |
+| syndrome_observation | 75,598 | 75,598 | 0 |
+| circuit | 6 | 6 | 0 |
+| stabilizer_check | 4 | 4 | 0 |
+| conditional_correction | 6 | 6 | 0 |
+| **Gold load (total)** | 325,619 | 325,619 | 0 |
 
 ## command to run
 
-The whole pipeline can be cleanly run with the following commmands. 
+The whole pipeline can be cleanly run with the following commands. 
 1. make bootstrap: make the container where the pipeline will be ran
 2. make train: The actual pipeline. 
 3. make test: executes automated tests in the /tests folder
 
-## troubleshooting
+## Testing
 
 Different tests were written to ensure quality of the data.
-In the tests folder, various tests python folders can be found, covering all silver tables. For example, the test_google_experiment.py covers: valid experiment, broken input, repeatability and multilple experiments.
+In the tests folder, various tests python folders can be found, covering all silver tables. For example, the test_google_experiment.py covers: valid experiment, broken input, repeatability and multiple experiments.
+
+## Troubleshooting
  
 ## AI-usage
 
-AI was mostly used for assistance in the understanding of the assignment 
+AI was mostly used for assistance in the understanding of the assignment. Specifically what each table and source represents, the structure of the data and the flow and requirements from the assignment. 
+
+## SQL analysis 
