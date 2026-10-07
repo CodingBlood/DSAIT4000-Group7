@@ -26,7 +26,7 @@ They use different formats, describe different things and share no identifiers. 
 
 Altogether we processed \_\_\_\_ rows, and all of them were accepted. The full run from raw files to ML tables and analyses takes about \_\_seconds.
 
-**Work distribution.** The work was split by data source. Karthik and Alex handled the Google and syndrome sources from Bronze through to Gold. Divit, Siddhart and Sahil handled the QASMBench source. For Part II, the split followed the same lines: Divit, Siddhart and Sahil built the models for the syndrome data, and Karthik and Alex built the models for the Google data. Smaller tasks, such as documentation, testing and reviews, were shared out according to each person's workload at the time.
+**Work distribution.** The work was split by data source. Kartik and Alex handled the Google and syndrome sources from Bronze through to Gold. Divit, Siddhart and Sahil handled the QASMBench source. For Part II, the split followed the same lines: Divit, Siddhart and Sahil built the models for the syndrome data, and Karthik and Alex built the models for the Google data. Smaller tasks, such as documentation, testing and reviews, were shared out according to each person's workload at the time.
 
 # Sources and what makes each hard
 
@@ -49,6 +49,11 @@ The google_surface_code contains of 5 directories, with each individual one havi
 Each experiment row is identified by **experiment_id** and a **source_record_id** which links back to its properties.yml file. Every row represent an experiment in a particular chip region (center row/col), how for a particular measurement (basis) and error protection (code distance) measurement cycle was performed for how many runs (shots) And within that shot how many times (rounds) the cycle was performed. it also records the number of raw readout bits per shot (measurement_count) and the final count of detector-event bits per shot (detector_count).
 
 Each experiment has many shots, implying one-to-many relationship used in the Gold schema.
+
+Where the shot table comes from?
+Each shot's measurement_bits, sweep_bits and detector_bits are read from the experiment's three .b8 files, detector_event_count is counted from the detector bits, actual_observable_flip and the four decoder predictions each come from their own .01 file, and the IDs (source_record_id, experiment_id) come from a hash of the experiment folder name and shot number.
+
+**The shot table.** Each of the 250,000 shots is one row in `silver/google_qec/shot.parquet`. The hardware readings for a shot are a long string of 0s and 1s, like 0100101.... To save space, the file packs them into bytes, 8 bits per byte. A shot with 13 bits needs 2 bytes, which is 16 bits, so the last 3 bits are filler zeros. Those filler bits aren't real readings. If we read them as real data, the counts come out slightly wrong. So when we unpack the bytes, we keep only the real bits and throw the filler away. 
 
 ## **Syndrome source**
 
