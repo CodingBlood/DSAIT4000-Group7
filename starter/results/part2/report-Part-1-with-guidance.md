@@ -164,6 +164,38 @@ erDiagram
   }
 ```
 
+`qec_syndromes` data is stored in three PostgreSQL tables:
+
+- `syndrome_experiment`: one row per noise level (one simulated experiment), with its code distance and physical fault rate.
+- `syndrome_pattern`: one row per distinct 16-bit syndrome (4 rounds × 4 checks). Storing each pattern once avoids repeating it in every observation.
+- `syndrome_observation`: one row per observation. It links one experiment, one pattern, the logical-error label (yes/no), and `quantity`, the number of simulated shots the row represents.
+
+```mermaid
+erDiagram
+  SYNDROME_EXPERIMENT ||--o{ SYNDROME_OBSERVATION : "has many"
+  SYNDROME_PATTERN ||--o{ SYNDROME_OBSERVATION : "seen in"
+
+  SYNDROME_EXPERIMENT {
+    string experiment_id PK
+    int distance
+    float physical_fault_rate
+  }
+  SYNDROME_PATTERN {
+    string pattern_id PK
+    bytea syndrome_bits UK
+    int round_count
+    int check_count
+  }
+  SYNDROME_OBSERVATION {
+    string source_record_id PK
+    string experiment_id FK
+    string pattern_id FK
+    bool logical_error_label
+    bigint quantity
+  }
+```
+
+
 ## Key decisions
 
 *What goes here: A table: decision, reason, alternative not chosen. Include the transaction load, the deterministic ids and the ML views.*
