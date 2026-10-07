@@ -1,0 +1,85 @@
+{
+  "run_id": "648cbdd5-7426-4ded-87b7-b59399ce7fcc",
+  "code_revision": "a57c81fdb08aae8a1e8f2e4fb27bb0e924138d0b",
+  "input_hashes": {
+    "bronze/source=qasmbench/qasmbench-qec.zip": {
+      "sha256": "60307f88e34b1f752b94223d6d136da72c629b4b625ac6d1c30e5e2e4f85722a",
+      "bytes": 144172
+    },
+    "bronze/source=qec_syndromes/syndromes_dataset.zip": {
+      "sha256": "bdfce36a71f04295ac78fb372d9c2e381801c05e3be119f919750ef59026d072",
+      "bytes": 358017
+    },
+    "bronze/source=google_qec/google-surface-code-curated.zip": {
+      "sha256": "5d6a24f89f055883a49910979490be4baef54d28bf9a0f8e096a1d6c46d1ea56",
+      "bytes": 14638673
+    }
+  },
+  "started_at": "2026-10-07T08:07:22.598634+00:00",
+  "finished_at": "2026-10-07T08:07:56.697835+00:00",
+  "stages": [
+    {
+      "stage": "register_sources",
+      "input_count": 3,
+      "output_count": 3,
+      "issue_count": 0,
+      "started_at": "2026-10-07T08:07:22.598634+00:00",
+      "finished_at": "2026-10-07T08:07:22.872663+00:00"
+    },
+    {
+      "stage": "prepare_data",
+      "input_count": 325619,
+      "output_count": 325619,
+      "issue_count": 0,
+      "started_at": "2026-10-07T08:07:22.876978+00:00",
+      "finished_at": "2026-10-07T08:07:29.394031+00:00"
+    },
+    {
+      "stage": "load_postgres",
+      "input_count": 325619,
+      "output_count": 325619,
+      "issue_count": 0,
+      "started_at": "2026-10-07T08:07:29.458496+00:00",
+      "finished_at": "2026-10-07T08:07:51.591335+00:00"
+    },
+    {
+      "stage": "build_ml_tables",
+      "input_count": 325598,
+      "output_count": 325598,
+      "issue_count": 0,
+      "started_at": "2026-10-07T08:07:51.606692+00:00",
+      "finished_at": "2026-10-07T08:07:55.927172+00:00"
+    },
+    {
+      "stage": "analysis",
+      "input_count": 5,
+      "output_count": 44,
+      "issue_count": 0,
+      "started_at": "2026-10-07T08:07:55.948078+00:00",
+      "finished_at": "2026-10-07T08:07:56.697835+00:00"
+    }
+  ],
+  "table_row_count": {
+    "silver.google_qec.experiment": 5,
+    "silver.google_qec.shot": 250000,
+    "silver.qec_syndromes.syndrome_observation": 75598,
+    "silver.qasmbench.circuit": 6,
+    "silver.qasmbench.stabilizer_check": 4,
+    "silver.qasmbench.conditional_correction": 6,
+    "ml.ml_google_decoder_example": 250000,
+    "ml.ml_syndrome_decoder_example": 75598,
+    "gold.experiment": 5,
+    "gold.shot": 250000,
+    "gold.decoder": 4,
+    "gold.shot_prediction": 1000000,
+    "gold.syndrome_experiment": 7,
+    "gold.syndrome_pattern": 31941,
+    "gold.syndrome_observation": 75598,
+    "gold.circuit": 6,
+    "gold.circuit_register": 16,
+    "gold.circuit_qubit": 30,
+    "gold.stabilizer_check": 4,
+    "gold.stabilizer_check_data_qubit": 8,
+    "gold.conditional_correction": 6
+  }
+}

@@ -11,7 +11,6 @@ from rich.table import Table
 from .config import Settings
 from .connections import bronze_inventory, check_platform
 
-
 console = Console()
 
 
@@ -32,95 +31,144 @@ def command_inventory(settings: Settings) -> int:
     return 0
 
 
-def command_run(settings: Settings) -> int:
+PARQUET_TABLES = {
+    "silver.google_qec.experiment": "silver/google_qec/experiment.parquet",
+    "silver.google_qec.shot": "silver/google_qec/shot.parquet",
+    "silver.qec_syndromes.syndrome_observation": "silver/qec_syndromes/syndrome_observation.parquet",
+    "silver.qasmbench.circuit": "silver/qasmbench/circuit.parquet",
+    "silver.qasmbench.stabilizer_check": "silver/qasmbench/stabilizer_check.parquet",
+    "silver.qasmbench.conditional_correction": "silver/qasmbench/conditional_correction.parquet",
+    "ml.ml_google_decoder_example": "ml/ml_google_decoder_example.parquet",
+    "ml.ml_syndrome_decoder_example": "ml/ml_syndrome_decoder_example.parquet",
+}
+GOLD_TABLES = [
+    "experiment", "shot", "decoder", "shot_prediction",
+    "syndrome_experiment", "syndrome_pattern", "syndrome_observation",
+    "circuit", "circuit_register", "circuit_qubit",
+    "stabilizer_check", "stabilizer_check_data_qubit", "conditional_correction",
+]
+
+
+def readable_error(settings: Settings, error: Exception) -> str | None:
+    import psycopg
+    from minio.error import S3Error
+    from urllib3.exceptions import MaxRetryError
+    from .pipeline_utils import PipelineError
+
+    if isinstance(error, PipelineError):
+        return str(error)
+    if isinstance(error, psycopg.OperationalError):
+        return (f"PostgreSQL error at {settings.postgres_host}:{settings.postgres_port}: {error}. "
+                "If the database is not running, start the platform with make up.")
+    if isinstance(error, MaxRetryError):
+        return f"Cannot connect to MinIO at {settings.s3_endpoint}. Start the platform with make up and try again."
+    if isinstance(error, FileNotFoundError):
+        return f"File not found: {error.filename}. Run the earlier pipeline stages first."
+    if isinstance(error, S3Error):
+        return f"MinIO error {error.code} for {error.object_name}. Run make seed to load the Bronze files."
+    return None
+
+
+def git_revision() -> str:
+    import subprocess
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
+    except Exception:
+        return "unknown"
+
+
+def run_pipeline(settings: Settings) -> None:
     import json
     import os
-    import subprocess
-    import uuid # generate id for each unique pipeline run
-    from .stages import register_sources,prepare_data, load_postgres,build_ml_tables
+    import uuid
+    import pyarrow.parquet as pq
+    from .connections import postgres_connection
+    from .stages import register_sources, prepare_data, load_postgres, build_ml_tables, analysis
+    from .traces import build_trace_examples
 
-    run_id = str(uuid.uuid4()) # create id for that pipeline run
-    result1 = register_sources.run(run_id) # make silver table
-    console.print(f"[green]Stage '{result1.stage}' "
-                  f"{result1.output_count} rows written")
-    result2 = prepare_data.run(run_id) # make silver table
-    console.print(f"[green]Stage '{result2.stage}' "
-                  f"{result2.output_count} rows written")
+    run_id = str(uuid.uuid4())
+    result1 = register_sources.run(run_id)
+    console.print(f"[green]Stage '{result1.stage}'[/green]: {result1.output_count} Bronze objects verified")
+    result2 = prepare_data.run(run_id)
+    console.print(f"[green]Stage '{result2.stage}'[/green]: {result2.output_count} Silver rows written")
     result3 = load_postgres.run(run_id)
-    console.print(f"[green]Stage '{result3.stage}'[/green]: "
-                  f"{result3.output_count} rows loaded")
-
+    console.print(f"[green]Stage '{result3.stage}'[/green]: {result3.output_count} rows loaded")
     result4 = build_ml_tables.run(run_id)
     console.print(f"[green]Stage '{result4.stage}'[/green]: {result4.output_count} ML rows exported")
-    # manual step for actual correct hash: git rev-parse HEAD > starter/.git-revision 
-    # THIS IS FOR RUN.JSON
-    def git_revision() -> str:
-        try:
-            return subprocess.check_output(
-                ["git", "rev-parse", "HEAD"], text=True
-            ).strip()
-        except Exception:
-            return "unknown"
+    result5 = analysis.run(run_id)
+    console.print(f"[green]Stage '{result5.stage}'[/green]: {result5.input_count} SQL analyses saved")
+    build_trace_examples.main()
+
+    stage_results = [result1, result2, result3, result4, result5]
+
     table_counts = {}
-    # tries to count the Silver rows
-    try:
-        import pandas as pd
-        for name, path in [
-            ("silver.google_qec.experiment", "silver/google_qec/experiment.parquet"),
-            ("silver.google_qec.shot", "silver/google_qec/shots.parquet"),
-        ]:
-            if os.path.exists(path):
-                table_counts[name] = len(pd.read_parquet(path))
-    except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] could not count Silver rows: {exc}")
-    # tries to count the GOld rows
-    try: 
-        from .connections import postgres_connection
-        with postgres_connection(settings) as conn: # postgres connection
-            with conn.cursor() as cur:
-                for table in ["experiment", "shot", "decoder", "shot_prediction"]:
-                    cur.execute(f"SELECT COUNT(*) FROM {table}")
-                    table_counts[f"gold.{table}"] = cur.fetchone()[0] # get row count 
-    except Exception as exc:
-        console.print(f"[yellow]Warning:[/yellow] could not count Gold rows: {exc}")
-    stage_results = [result1, result2, result3]
-    # record the actual run information 
+    for name, path in PARQUET_TABLES.items():
+        table_counts[name] = pq.read_metadata(path).num_rows
+
+    with postgres_connection(settings) as conn:
+        with conn.cursor() as cur:
+            for table in GOLD_TABLES:
+                cur.execute(f"SELECT COUNT(*) FROM {table}")
+                table_counts[f"gold.{table}"] = cur.fetchone()[0]
+
+    stages = []
+    for r in stage_results:
+        finished = None
+        if r.finished_at:
+            finished = r.finished_at.isoformat()
+        stages.append({
+            "stage": r.stage,
+            "input_count": r.input_count,
+            "output_count": r.output_count,
+            "issue_count": r.issue_count,
+            "started_at": r.started_at.isoformat(),
+            "finished_at": finished,
+        })
+
     run_record = {
-        "run_id:": run_id,
-        "code_revision: ": git_revision(),
-        "started_at:": stage_results[0].started_at.isoformat(),
-        "finished_at": stage_results[-1].finished_at.isoformat() if stage_results[-1].finished_at else None,
-        "stages" : [
-            {
-                "stage": r.stage,
-                "input_count": r.input_count,
-                "output_count": r.output_count,
-                "issue_count": r.issue_count,
-                "started_at": r.started_at.isoformat(),
-                "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-            }
-            for r in stage_results
-        ], 
+        "run_id": run_id,
+        "code_revision": git_revision(),
+        "input_hashes": result1.input_hashes,
+        "started_at": stage_results[0].started_at.isoformat(),
+        "finished_at": stages[-1]["finished_at"],
+        "stages": stages,
         "table_row_count": table_counts,
     }
 
-    # output results
-    os.makedirs("results/part1", exist_ok=True) 
+    os.makedirs("results/part1", exist_ok=True)
     with open("results/part1/run.json", "w") as f:
         json.dump(run_record, f, indent=2)
-
     console.print("[green]Wrote results/part1/run.json[/green]")
 
+
+def command_run(settings: Settings) -> int:
+    try:
+        run_pipeline(settings)
+    except Exception as error:
+        message = readable_error(settings, error)
+        if message is None:
+            raise
+        console.print(f"[red]Pipeline stopped:[/red] {message}")
+        return 1
     return 0
 
 
-def command_train(_: Settings) -> int:
+def command_train(settings: Settings) -> int:
     import uuid
     from .stages import train
+    from .traces import build_trace_examples
 
-    model_run_id = str(uuid.uuid4())
-    result = train.run(model_run_id)
-    console.print(f"[green]Stage '{result.stage}'[/green]: {result.output_count} predictions written")
+    try:
+        model_run_id = str(uuid.uuid4())
+        result = train.run(model_run_id)
+        console.print(f"[green]Stage '{result.stage}'[/green]: {result.output_count} predictions written")
+        build_trace_examples.main()
+    except Exception as error:
+        message = readable_error(settings, error)
+        if message is None:
+            raise
+        console.print(f"[red]Training stopped:[/red] {message}")
+        return 1
     return 0
 
 
