@@ -32,7 +32,6 @@ Altogether we processed \_\_\_\_ rows, and all of them were accepted. The full r
 
 ## Data Overview
 
-*What goes here: One table of the three sources: name, Bronze file, size, content. Keep it to one line per source.*
 
 | **Source**          | **Bronze file**                 | **Size**   | **Content**                                      |
 |---------------------|---------------------------------|------------|--------------------------------------------------|
@@ -41,8 +40,6 @@ Altogether we processed \_\_\_\_ rows, and all of them were accepted. The full r
 | QASMBench           | qasmbench-qec.zip               | 144,172    | 6 circuit files plus a gate library              |
 
 ## **Google surface-code source**
-
-*What goes here: What the source contains (5 experiments, 250,000 shots, four decoders), how the bits are stored (Stim b8 format), and the problem we found.*
 
 The google_surface_code contains of 5 directories, with each individual one having properties.yml, a metadata file corresponding with the google experiment tables for the Silver stage. For each experiment, 50000 shots are performed, summing up to 250000 shots.
 
@@ -79,10 +76,6 @@ Each shot's measurement_bits, sweep_bits and detector_bits are read from the exp
 
 The architecture used is aligned with the with the quantum_lake_student stages.
 When running the pipeline, everything starts in cli.py. The bronze sources are being fetched from the MinIO, which are being verified (register_sources.py). After the data sources have been verified, the run proceeds to the second and also biggest stage, which implies cleaning and generating silver schema for all three bronze resources. This happens in prepare_data.py, where all the required data is being extracted from the bronze sources, checked for consistency, and appended into the corresponding silver stage table. In addition to that a shared tracing table is generated as well, covering the mapping of every Silver table back to bronze. Upon completion of all the 6 silver tables, the golden schema is getting generated in the load_postgres.py stage, where the tables are being generated (with keys, constraints, and indexes) and filled in with the data from the silver stage. 
-
-## Stages, key functions and techniques
-
-*What goes here: One table: stage, key functions, processing techniques (for example checksum verification, bit unpacking, macro expansion, bulk COPY in one transaction). Include only functions that carry a decision.*
 
 # Silver: cleaning, validation, traceability
 
