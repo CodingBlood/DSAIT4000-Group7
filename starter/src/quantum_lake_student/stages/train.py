@@ -73,7 +73,7 @@ def run_task_b(df_ml: pd.DataFrame) -> dict:
         "train_rows": len(train_df),
         "test_rows": len(test_df),
     }
-        return {"predictions": predictions, "metrics": metrics, "model": model}
+    return {"predictions": predictions, "metrics": metrics, "model": model}
 
 class WeightedPriorBaseline:
     """Weighted majority/prior baseline: predicts the weighted positive rate."""

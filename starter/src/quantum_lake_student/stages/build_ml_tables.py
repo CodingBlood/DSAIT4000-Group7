@@ -7,7 +7,7 @@ fixed contracts, and write Parquet. It must not re-read Bronze or Silver.
 
 import hashlib
 import os
-import nupmy as np
+import numpy as np
 import pandas as pd
 from quantum_lake_student.config import Settings
 from quantum_lake_student.connections import postgres_connection
