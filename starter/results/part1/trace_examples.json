@@ -3,10 +3,58 @@
     "part2_predictions": [
       {
         "example_id": "ml_f1d5fd50f9b1",
-        "model_id": "task_b_combined_logistic_regression",
+        "model_id": "task_b_d3_majority_baseline",
+        "label": true,
+        "prediction": false,
+        "probability": 0.4916375,
+        "split": "test"
+      },
+      {
+        "example_id": "ml_f1d5fd50f9b1",
+        "model_id": "task_b_d3_belief_matching",
         "label": true,
         "prediction": true,
-        "probability": 0.557482507223407,
+        "probability": NaN,
+        "split": "test"
+      },
+      {
+        "example_id": "ml_f1d5fd50f9b1",
+        "model_id": "task_b_d3_correlated_matching",
+        "label": true,
+        "prediction": false,
+        "probability": NaN,
+        "split": "test"
+      },
+      {
+        "example_id": "ml_f1d5fd50f9b1",
+        "model_id": "task_b_d3_pymatching",
+        "label": true,
+        "prediction": false,
+        "probability": NaN,
+        "split": "test"
+      },
+      {
+        "example_id": "ml_f1d5fd50f9b1",
+        "model_id": "task_b_d3_tensor_network_contraction",
+        "label": true,
+        "prediction": true,
+        "probability": NaN,
+        "split": "test"
+      },
+      {
+        "example_id": "ml_f1d5fd50f9b1",
+        "model_id": "task_b_d3_combined_logistic_regression",
+        "label": true,
+        "prediction": true,
+        "probability": 0.5548652744812728,
+        "split": "test"
+      },
+      {
+        "example_id": "ml_f1d5fd50f9b1",
+        "model_id": "task_c_mlp",
+        "label": true,
+        "prediction": true,
+        "probability": 0.89487142067726,
         "split": "test"
       }
     ],

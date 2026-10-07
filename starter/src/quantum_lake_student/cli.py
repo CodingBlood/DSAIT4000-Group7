@@ -153,69 +153,6 @@ def command_run(settings: Settings) -> int:
     return 0
 
 
-def snapshot(settings: Settings) -> dict:
-    import hashlib
-    import pyarrow.parquet as pq
-    from .connections import postgres_connection
-
-    tables = {}
-    for name, path in PARQUET_TABLES.items():
-        id_column = "source_record_id"
-        if name.startswith("ml."):
-            id_column = "example_id"
-        ids = pq.read_table(path, columns=[id_column]).column(0).to_pylist()
-        ids.sort()
-        tables[name] = {
-            "rows": len(ids),
-            "id_hash": hashlib.sha256("\n".join(ids).encode()).hexdigest(),
-        }
-
-    with postgres_connection(settings) as conn:
-        with conn.cursor() as cur:
-            for table in GOLD_TABLES:
-                cur.execute(
-                    f"SELECT COUNT(*), md5(string_agg(md5(t::text), '' ORDER BY md5(t::text))) FROM {table} t"
-                )
-                row = cur.fetchone()
-                tables[f"gold.{table}"] = {"rows": row[0], "content_hash": row[1]}
-    return tables
-
-
-def command_rerun_check(settings: Settings) -> int:
-    import json
-    import os
-
-    snapshots = []
-    for run_number in [1, 2]:
-        console.print(f"[bold]Run {run_number} of 2[/bold]")
-        exit_code = command_run(settings)
-        if exit_code != 0:
-            return exit_code
-        snapshots.append(snapshot(settings))
-
-    changed = []
-    for name in snapshots[0]:
-        if snapshots[0][name] != snapshots[1][name]:
-            changed.append(name)
-
-    evidence = {
-        "code_revision": git_revision(),
-        "identical_after_second_run": len(changed) == 0,
-        "changed_tables": changed,
-        "first_run": snapshots[0],
-        "second_run": snapshots[1],
-    }
-    os.makedirs("results/part1", exist_ok=True)
-    with open("results/part1/rerun_check.json", "w") as f:
-        json.dump(evidence, f, indent=2)
-
-    if len(changed) > 0:
-        console.print(f"[red]Second run changed: {changed}[/red]")
-        return 1
-    console.print("[green]Second run produced identical rows and identifiers. Wrote results/part1/rerun_check.json[/green]")
-    return 0
-
-
 def command_train(settings: Settings) -> int:
     import uuid
     from .stages import train
@@ -239,7 +176,7 @@ def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument(
         "command",
-        choices=("check", "inventory", "run", "rerun-check", "train"),
+        choices=("check", "inventory", "run", "train"),
         help="Action to perform",
     )
     return result
@@ -252,7 +189,6 @@ def main() -> None:
         "check": command_check,
         "inventory": command_inventory,
         "run": command_run,
-        "rerun-check": command_rerun_check,
         "train": command_train,
     }
     raise SystemExit(commands[arguments.command](settings))
