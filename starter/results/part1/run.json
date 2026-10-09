@@ -1,6 +1,6 @@
 {
-  "run_id": "304f6b39-62ae-429b-b7c9-795f8cc34298",
-  "code_revision": "1297146d3394e5110b6fe6ad92314daf0ba6de58",
+  "run_id": "c64bdccc-f04c-47fd-9e6f-4a719b107549",
+  "code_revision": "unknown",
   "input_hashes": {
     "bronze/source=qasmbench/qasmbench-qec.zip": {
       "sha256": "60307f88e34b1f752b94223d6d136da72c629b4b625ac6d1c30e5e2e4f85722a",
@@ -15,48 +15,48 @@
       "bytes": 14638673
     }
   },
-  "started_at": "2026-10-09T03:06:26.046353+00:00",
-  "finished_at": "2026-10-09T03:06:57.300794+00:00",
+  "started_at": "2026-10-09T13:58:37.387244+00:00",
+  "finished_at": "2026-10-09T13:59:07.254497+00:00",
   "stages": [
     {
       "stage": "register_sources",
       "input_count": 3,
       "output_count": 3,
       "issue_count": 0,
-      "started_at": "2026-10-09T03:06:26.046353+00:00",
-      "finished_at": "2026-10-09T03:06:26.073342+00:00"
+      "started_at": "2026-10-09T13:58:37.387244+00:00",
+      "finished_at": "2026-10-09T13:58:37.428581+00:00"
     },
     {
       "stage": "prepare_data",
       "input_count": 325619,
       "output_count": 325619,
       "issue_count": 80,
-      "started_at": "2026-10-09T03:06:26.075387+00:00",
-      "finished_at": "2026-10-09T03:06:32.032744+00:00"
+      "started_at": "2026-10-09T13:58:37.430415+00:00",
+      "finished_at": "2026-10-09T13:58:43.355199+00:00"
     },
     {
       "stage": "load_postgres",
       "input_count": 325619,
       "output_count": 325619,
       "issue_count": 0,
-      "started_at": "2026-10-09T03:06:32.098854+00:00",
-      "finished_at": "2026-10-09T03:06:52.460800+00:00"
+      "started_at": "2026-10-09T13:58:43.424395+00:00",
+      "finished_at": "2026-10-09T13:59:02.328751+00:00"
     },
     {
       "stage": "build_ml_tables",
       "input_count": 325598,
       "output_count": 325598,
       "issue_count": 0,
-      "started_at": "2026-10-09T03:06:52.472292+00:00",
-      "finished_at": "2026-10-09T03:06:56.581841+00:00"
+      "started_at": "2026-10-09T13:59:02.341616+00:00",
+      "finished_at": "2026-10-09T13:59:06.495614+00:00"
     },
     {
       "stage": "analysis",
       "input_count": 5,
       "output_count": 44,
       "issue_count": 0,
-      "started_at": "2026-10-09T03:06:56.598450+00:00",
-      "finished_at": "2026-10-09T03:06:57.300794+00:00"
+      "started_at": "2026-10-09T13:59:06.514044+00:00",
+      "finished_at": "2026-10-09T13:59:07.254497+00:00"
     }
   ],
   "table_row_count": {
