@@ -16,16 +16,12 @@ import zipfile
 
 import pytest
 
-from quantum_lake_student.stages.prepare_data import QasmBenchUtility
+from quantum_lake_student.stages.prepare_data import QasmBenchUtility as Utility
 
-# The shared QASM helpers were module-level functions when these tests were
-# written. The OOP restructuring moved them onto QasmBenchUtility as
-# staticmethods; the bodies are unchanged, so these aliases keep the tests
-# reading the same way.
-qasm_statements = QasmBenchUtility.qasm_statements
-qasm_registers = QasmBenchUtility.qasm_registers
-qasm_gate_definitions = QasmBenchUtility.qasm_gate_definitions
-qasm_circuit_identity = QasmBenchUtility.qasm_circuit_identity
+qasm_circuit_identity = Utility.qasm_circuit_identity
+qasm_gate_definitions = Utility.qasm_gate_definitions
+qasm_registers = Utility.qasm_registers
+qasm_statements = Utility.qasm_statements
 
 MEMBER = "small/demo_n5/demo_n5.qasm"
 FAKE_SHA = "0" * 64
@@ -49,7 +45,7 @@ def archive_of(qasm: str, member: str = MEMBER) -> bytes:
 
 def corrections(qasm: str, member: str = MEMBER):
     """(rows, trace_rows, issue_rows) for a one-circuit archive."""
-    return QasmBenchUtility.build_conditional_correction_rows(
+    return Utility.build_conditional_correction_rows(
         archive_of(qasm, member), member, FAKE_SHA
     )
 
@@ -221,11 +217,16 @@ def test_circuit_identity_distinguishes_variants():
     assert qasm_circuit_identity(source)[0] != qasm_circuit_identity(transpiled)[0]
 
 
-# qasm_condition_trigger_bits() used to live here and mapped a condition value
-# to the syndrome bits it requires (3 -> syn[0], syn[1]). It was removed during
-# the OOP restructuring as unused. That is the right call: the Gold schema
-# stores condition_value directly, so the analysis query does the bit test in
-# SQL (condition_value & 1, condition_value & 2) rather than in Python.
+# --------------------------------------------------------------------------
+# Gold helper
+# --------------------------------------------------------------------------
+
+# @pytest.mark.parametrize(
+#     "value, expected",
+#     [(0, []), (1, ["syn[0]"]), (2, ["syn[1]"]), (3, ["syn[0]", "syn[1]"])],
+# )
+# def test_condition_value_maps_to_the_syndrome_bits_that_fired(value, expected):
+#     assert qasm_condition_trigger_bits("syn", value, 2) == expected
 
 
 # --------------------------------------------------------------------------
@@ -255,7 +256,7 @@ def test_identifier_does_not_depend_on_the_archive_it_arrives_in():
     buffer = io.BytesIO(raw)
     with zipfile.ZipFile(buffer, "a") as handle:
         handle.writestr(MEMBER, qasm)
-    rows_b, _t, _i = QasmBenchUtility.build_conditional_correction_rows(
+    rows_b, _t, _i = Utility.build_conditional_correction_rows(
         buffer.getvalue(), MEMBER, FAKE_SHA
     )
     assert rows_a[0]["source_record_id"] == rows_b[0]["source_record_id"]
@@ -274,7 +275,7 @@ LIBRARY = "gate h a { U(0,0,0) a; }\ngate x a { U(0,0,0) a; }\ngate cx c,t { CX 
 
 
 def circuits(qasm: str, member: str = MEMBER, library: str = LIBRARY):
-    return QasmBenchUtility.build_circuit_rows(
+    return Utility.build_circuit_rows(
         archive_of(qasm, member), member, FAKE_SHA, library
     )
 
@@ -427,7 +428,7 @@ def test_every_qasmbench_table_uses_the_same_locator_vocabulary():
     known = {locator for locator, _statement in qasm_statements(REPETITION_CODE)}
 
     _circuit, circuit_traces, _i = circuits(REPETITION_CODE)
-    checks, check_traces, _i = QasmBenchUtility.build_stabilizer_check_rows(
+    checks, check_traces, _i = Utility.build_stabilizer_check_rows(
         archive_of(REPETITION_CODE), "demo_n5", "source", MEMBER, FAKE_SHA
     )
     corrections_rows, correction_traces, _i = corrections(REPETITION_CODE)
@@ -454,7 +455,7 @@ def test_tables_agree_on_the_position_of_one_statement():
     measure_line = locators["measure a[1] -> syn[1]"]
 
     corrections_rows, _t, _i = corrections(REPETITION_CODE)
-    checks, _t, _i = QasmBenchUtility.build_stabilizer_check_rows(
+    checks, _t, _i = Utility.build_stabilizer_check_rows(
         archive_of(REPETITION_CODE), "demo_n5", "source", MEMBER, FAKE_SHA
     )
 
@@ -469,7 +470,7 @@ def test_whole_register_measure_keeps_one_locator_for_both_checks():
     macro_version = REPETITION_CODE.replace(
         "measure a[0] -> syn[0];\nmeasure a[1] -> syn[1];", "measure a -> syn;"
     )
-    checks, _t, _i = QasmBenchUtility.build_stabilizer_check_rows(
+    checks, _t, _i = Utility.build_stabilizer_check_rows(
         archive_of(macro_version), "demo_n5", "source", MEMBER, FAKE_SHA
     )
     assert len(checks) == 2
@@ -477,3 +478,61 @@ def test_whole_register_measure_keeps_one_locator_for_both_checks():
     assert len({c["source_record_id"] for c in checks}) == 2, (
         "the ancilla suffix must still keep the two ids distinct"
     )
+
+
+# --------------------------------------------------------------------------
+# gate-name validation
+#
+# Both of these were real false positives. Running over the release produced 80
+# "unknown gate" warnings: 74 for sx and 6 for if. Neither was a data problem.
+# --------------------------------------------------------------------------
+
+def test_hardware_basis_gate_is_not_reported_as_unknown():
+    """sx is the square root of X, a standard basis gate that transpilers emit.
+    The qelib1.inc shipped in this release predates it, so validating against
+    the library alone flagged every occurrence."""
+    qasm = "OPENQASM 2.0;\nqreg q[2];\nsx q[0];\nrz(pi/2) q[1];\n"
+    rows, _t, issues = circuits(qasm, library=LIBRARY + "gate rz(p) a { U(0,0,p) a; }\n")
+    assert len(rows) == 1
+    assert "qasm_circuit_known_gate" not in rules_fired(issues)
+
+
+def test_conditional_is_not_reported_as_a_gate_named_if():
+    """`if (creg == int) <operation>;` is a wrapper. Matching the whole
+    statement as an operation reported the gate name as "if"."""
+    qasm = PREAMBLE + "if(syn==1) x q[0];\n"
+    rows, _t, issues = circuits(qasm)
+    assert len(rows) == 1
+    unknown = [i for i in issues if i["rule_id"] == "qasm_circuit_known_gate"]
+    assert unknown == [], f"unexpected warnings: {unknown}"
+
+
+def test_operation_guarded_by_a_condition_still_counts():
+    """Unwrapping the condition means the guarded operation is counted, which
+    is what makes a conditional two-qubit gate show up in the count."""
+    plain = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q -> c;\ncx q[0],q[1];\n"
+    guarded = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q -> c;\nif(c==1) cx q[0],q[1];\n"
+
+    plain_rows, _t, _i = circuits(plain)
+    guarded_rows, _t, _i = circuits(guarded)
+    assert plain_rows[0]["two_qubit_gate_count"] == 1
+    assert guarded_rows[0]["two_qubit_gate_count"] == 1
+
+
+def test_the_release_itself_produces_no_gate_warnings():
+    """Regression guard on the real archive: 80 warnings before the fix, 0
+    after. Uses Bronze, so it is skipped when the object store is unreachable."""
+    pytest.importorskip("minio")
+    try:
+        from quantum_lake_student.config import Settings
+        from quantum_lake_student.stages.prepare_data import fetch_bronze_bytes
+
+        raw = fetch_bronze_bytes(
+            Settings.from_environment(),
+            "bronze/source=qasmbench/qasmbench-qec.zip",
+        )
+    except Exception as error:                      # noqa: BLE001
+        pytest.skip(f"Bronze unavailable: {error}")
+
+    _circuit, _trace, issues, _candidates = Utility.qasmbench_circuit_table(raw)
+    assert len(issues) == 0, issues.to_dict("records")

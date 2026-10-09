@@ -39,10 +39,6 @@ def archive_of(props: dict | None, exp_dir:str = EXP_DIR) -> bytes:
             z.writestr(f"{exp_dir}/detection_events.b8", b"")
     return buffer.getvalue()
 
-#---------------------------------------------------------
-# check how whether correct folders are getting discovered
-#---------------------------------------------------------
-
 # test if we find unique top level directories 
 def test_list_zip_folders():
     buffer = io.BytesIO()
@@ -54,10 +50,6 @@ def test_list_zip_folders():
 
     folders = GoogleQecUtility.list_zip_folders(buffer.getvalue())
     assert folders == ["expA", "expB"]
-
-#---------------------------------------------------------
-# test for a complete path
-#---------------------------------------------------------
 
 # tests whether the experiment columns are valid values
 def test_valid_experiment():
@@ -114,10 +106,6 @@ def test_no_issues_experiment():
 
     assert len(df_issues) == 0
 
-#---------------------------------------------------------
-# test for a broken path
-#---------------------------------------------------------
-
 # now test whether the broken dir has been processed as an issue
 def test_missing_properties():
     df_exp, df_trace, df_issues, total_dirs = GoogleQecUtility.google_experiment_table(archive_of(None))
@@ -156,14 +144,10 @@ def test_rejected_valid_in_one():
 
     df_exp, df_trace, df_issues, total_dirs = GoogleQecUtility.google_experiment_table(buffer.getvalue())
 
-        # both broken and valid dir should be logged correctly
+    # both broken and valid dir should be logged correctly
     assert total_dirs == 2
     assert len(df_exp) == 1
     assert len(df_issues) == 1
-
-#---------------------------------------------------------
-# test for readability
-#---------------------------------------------------------
 
 # if we parse the same dir twice, does anything change
 def test_consequtive_parsing():
@@ -175,11 +159,6 @@ def test_consequtive_parsing():
     assert df_trace_a.equals(df_trace_b)
     assert df_issues_a.equals(df_issues_b)
     assert n_a == n_b
-
-
-#---------------------------------------------------------
-# test for multiple valid directories
-#---------------------------------------------------------
 
 def test_multiple_experiment_each_one_row():
     buffer = io.BytesIO()

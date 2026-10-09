@@ -1,11 +1,170 @@
 {
+  "task_a": {
+    "task_a_weighted_prior_baseline": {
+      "validation": {
+        "logical_error_rate": 0.0114403,
+        "balanced_accuracy": 0.5,
+        "brier_score": 0.0122792050842144,
+        "training_time_seconds": 0.0026886463165283203,
+        "prediction_time_seconds": 0.0001850128173828125,
+        "rows": 1407
+      },
+      "test": {
+        "logical_error_rate": 0.10395,
+        "balanced_accuracy": 0.5,
+        "brier_score": 0.0969104681996224,
+        "training_time_seconds": 0.0026886463165283203,
+        "prediction_time_seconds": 0.0007915496826171875,
+        "rows": 20887
+      }
+    },
+    "task_a_weighted_logistic_regression": {
+      "validation": {
+        "logical_error_rate": 0.0115113,
+        "balanced_accuracy": 0.5023011746126638,
+        "brier_score": 0.010637521886424313,
+        "training_time_seconds": 0.1257638931274414,
+        "prediction_time_seconds": 0.0004687309265136719,
+        "rows": 1407
+      },
+      "test": {
+        "logical_error_rate": 0.1094483,
+        "balanced_accuracy": 0.522363136843523,
+        "brier_score": 0.09095580410416897,
+        "training_time_seconds": 0.1257638931274414,
+        "prediction_time_seconds": 0.0015969276428222656,
+        "rows": 20887
+      }
+    }
+  },
   "task_b": {
-    "logical_error_rate": 0.39616,
-    "balanced_accuracy": 0.6037238346478266,
-    "brier_score": 0.2349210747317171,
-    "training_time_seconds": 0.19124269485473633,
-    "prediction_time_seconds": 0.10265684127807617,
-    "train_rows": 100000,
-    "test_rows": 125000
+    "distance_3": {
+      "models": {
+        "task_b_d3_majority_baseline": {
+          "logical_error_rate": 0.49295,
+          "balanced_accuracy": 0.5,
+          "brier_score": 0.24995202015625007
+        },
+        "task_b_d3_belief_matching": {
+          "logical_error_rate": 0.40133,
+          "balanced_accuracy": 0.5985358999222636,
+          "brier_score": null
+        },
+        "task_b_d3_correlated_matching": {
+          "logical_error_rate": 0.42197,
+          "balanced_accuracy": 0.5779208474436803,
+          "brier_score": null
+        },
+        "task_b_d3_pymatching": {
+          "logical_error_rate": 0.43636,
+          "balanced_accuracy": 0.5634564847837398,
+          "brier_score": null
+        },
+        "task_b_d3_tensor_network_contraction": {
+          "logical_error_rate": 0.39668,
+          "balanced_accuracy": 0.6031201183107213,
+          "brier_score": null
+        },
+        "task_b_d3_combined_logistic_regression": {
+          "logical_error_rate": 0.39722,
+          "balanced_accuracy": 0.6025061122401745,
+          "brier_score": 0.23515219914160923,
+          "threshold_from_validation": 0.5,
+          "validation_balanced_accuracy": 0.6065133187661048,
+          "training_time_seconds": 0.05097246170043945,
+          "prediction_time_seconds": 0.026422500610351562,
+          "train_rows": 80000,
+          "validation_rows": 20000,
+          "test_rows": 100000
+        }
+      },
+      "mistake_overlap": {
+        "shots_any_decoder_wrong": 69824,
+        "shots_all_decoders_wrong": 14440,
+        "shots_only_one_decoder_wrong": 19031,
+        "pairwise_shared_mistake_share": {
+          "belief_matching_prediction & correlated_matching_prediction": 0.4813415380186405,
+          "belief_matching_prediction & pymatching_prediction": 0.4361959298438116,
+          "belief_matching_prediction & tensor_network_contraction_prediction": 0.5337202821394937,
+          "correlated_matching_prediction & pymatching_prediction": 0.5322122851175494,
+          "correlated_matching_prediction & tensor_network_contraction_prediction": 0.39782467643342556,
+          "pymatching_prediction & tensor_network_contraction_prediction": 0.36309192656347156
+        },
+        "note": "69824 test shots were wrong for at least one decoder. 14440 of them were wrong for all four decoders and 19031 were wrong for only one decoder."
+      }
+    },
+    "distance_5": {
+      "models": {
+        "task_b_d5_majority_baseline": {
+          "logical_error_rate": 0.50152,
+          "balanced_accuracy": 0.5,
+          "brier_score": 0.250005088
+        },
+        "task_b_d5_belief_matching": {
+          "logical_error_rate": 0.39944,
+          "balanced_accuracy": 0.600571630242778,
+          "brier_score": null
+        },
+        "task_b_d5_correlated_matching": {
+          "logical_error_rate": 0.4226,
+          "balanced_accuracy": 0.5774100785929823,
+          "brier_score": null
+        },
+        "task_b_d5_pymatching": {
+          "logical_error_rate": 0.4548,
+          "balanced_accuracy": 0.5451846095780879,
+          "brier_score": null
+        },
+        "task_b_d5_tensor_network_contraction": {
+          "logical_error_rate": 0.39524,
+          "balanced_accuracy": 0.6047613329623347,
+          "brier_score": null
+        },
+        "task_b_d5_combined_logistic_regression": {
+          "logical_error_rate": 0.39768,
+          "balanced_accuracy": 0.6026480526322432,
+          "brier_score": 0.23406043447168412,
+          "threshold_from_validation": 0.55,
+          "validation_balanced_accuracy": 0.609916886993576,
+          "training_time_seconds": 0.013950109481811523,
+          "prediction_time_seconds": 0.005836963653564453,
+          "train_rows": 20000,
+          "validation_rows": 5000,
+          "test_rows": 25000
+        }
+      },
+      "mistake_overlap": {
+        "shots_any_decoder_wrong": 18908,
+        "shots_all_decoders_wrong": 2713,
+        "shots_only_one_decoder_wrong": 5933,
+        "pairwise_shared_mistake_share": {
+          "belief_matching_prediction & correlated_matching_prediction": 0.4125369441198708,
+          "belief_matching_prediction & pymatching_prediction": 0.3695010901628832,
+          "belief_matching_prediction & tensor_network_contraction_prediction": 0.48894551450198603,
+          "correlated_matching_prediction & pymatching_prediction": 0.41024816767391026,
+          "correlated_matching_prediction & tensor_network_contraction_prediction": 0.3727675574056667,
+          "pymatching_prediction & tensor_network_contraction_prediction": 0.3326853129311426
+        },
+        "note": "18908 test shots were wrong for at least one decoder. 2713 of them were wrong for all four decoders and 5933 were wrong for only one decoder."
+      }
+    }
+  },
+  "task_c": {
+    "validation": {
+      "logical_error_rate": 0.492,
+      "balanced_accuracy": 0.5079449817058026,
+      "brier_score": 0.4082215973602624,
+      "training_time_seconds": 12.034308910369873,
+      "prediction_time_seconds": 0.006528615951538086,
+      "rows": 5000
+    },
+    "test": {
+      "logical_error_rate": 0.50436,
+      "balanced_accuracy": 0.4956398526883802,
+      "brier_score": 0.4138149890320027,
+      "training_time_seconds": 12.034308910369873,
+      "prediction_time_seconds": 0.027889728546142578,
+      "rows": 25000
+    }
   }
 }

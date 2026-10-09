@@ -1,0 +1,8 @@
+candidate_join,matching_rows
+circuit_id = google experiment_id,0
+circuit_id = syndrome experiment_id,0
+measurement_count = google measurement_count,0
+qubit_count = google qubits (2 * distance * distance - 1),0
+stabilizer checks per circuit = google measure qubits (distance * distance - 1),0
+"name contains d<distance>, joined to syndrome rows",151196
+"name contains d<distance>, joined to google shots",400000
