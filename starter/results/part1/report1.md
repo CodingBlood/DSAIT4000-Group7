@@ -163,12 +163,18 @@ We use two levels:
 | QASMBench | `qasm_cc_condition_value_in_range`     | Error       | In an `if(syn==3)`, the value must fit the register. A 2-bit register can't be compared to 7.                                                                    |
 | QASMBench | `qasm_circuit_known_gate`              | Warning     | Every gate used should be one we recognise. An unknown gate looks suspicious, but the circuit may still be fine.                                                 |
 
-**Result of the run.** No row was rejected in any table. All 80 issues logged were warnings, all from `qasm_circuit_known_gate`:
+**Result of the run.** No row was rejected in any table. One warning was logged:
 
-- **74 warnings for the gate `sx`.** It appears in the transpiled files (62 in `error_correctiond3_n5_transpiled` and 12 in `qec_en_n5_transpiled`) but is not declared in `qelib1.inc`. The circuits are still correct, so we kept them.
-- **6 warnings for `if`.** Three in each `qec_sm_n5` file. Our check treats these `if` statements as gate names, so they are false alarms. We left them in the log instead of hiding them.
+- **`syndrome_documented_header_matches`, 1 row.** The bundled `README.txt` documents the first column as `label` while every CSV header says `labels`. The header is what we read, so no row is affected, but the mismatch stays visible in the log. It is recorded once for the archive rather than once per CSV, because it is a property of the release.
 
-The Google and syndrome data raised no issues at all.
+The Google and QASMBench data raised no issues.
+
+An earlier version of this run logged 80 warnings from `qasm_circuit_known_gate`, 74 for the gate `sx` and 6 for `if`. Both turned out to be faults in that rule rather than anything about the data, so we fixed the rule:
+
+- `sx` is the square root of X and a standard basis gate that transpilers emit. The `qelib1.inc` shipped with this release declares 35 gates and simply predates it, so we now allow a small named set of hardware basis gates alongside the ones read from the library.
+- `if` was never a gate. A conditional statement was being matched as an operation, which reported the gate name as `if` and left the guarded target qubit unparsed. The parser now unwraps the condition and looks at the operation it guards, which also means a conditional two-qubit gate is counted properly.
+
+Every table count stayed the same after the fix, so this removed noise without moving a number.
 
 **How the rules work.** The assignment lists the checks that must be implemented, such as byte alignment and padding for the Stim `b8` files, positive syndrome counts, and valid QASM registers. We turned each of these into a named rule. The checks run while Silver is being built, inside the functions in `prepare_data.py` that create each table. When a check fails, the code writes a row to `data_issues` with the rule name, the value it saw, the action taken and a reason. If the rule is an Error, the row is left out of Silver. If it is a Warning, the row is kept.
 
@@ -198,7 +204,7 @@ The Google and syndrome data raised no issues at all.
 
 There are more trace rows than Silver rows because a row can come from several places. A shot comes from 8 files, so it has 8 trace rows, and a stabilizer check comes from the several QASM lines that build it. In total there are 325,619 distinct `source_record_id` values.
 
-**`data_issues.parquet`** (80 rows). It has one row per problem, with `issue_id`, `source_record_id`, `rule_id`, `severity`, `observed_value`, `action`, `reason` and `run_id`. It tells us what the rule found and what we did about it.
+**`data_issues.parquet`** (1 row). It has one row per problem, with `issue_id`, `source_record_id`, `rule_id`, `severity`, `observed_value`, `action`, `reason` and `run_id`. It tells us what the rule found and what we did about it.
 
 **How to follow a row back.** Take the `source_record_id` of a Gold or ML row and look it up in `source_trace`. For example, the shot `google_shot_1ecd33282285` points to:
 
@@ -428,6 +434,9 @@ erDiagram
 - **Keep all 6 circuits.** Every file has a row in `circuit`. *Why:* the circuit table only describes what is in each file, and every file does have that. Dropping the others would lose information, and the files with no checks or corrections are still useful to show.
 - **Conditional corrections only where they exist.** Only `qec_sm_n5` has `if` statements (3 per variant, 6 in total), so the other benchmarks have no rows in that table. *Why:* an `if` statement is what makes a correction, so we only add a row when the file has one. Adding empty rows for the other circuits would be made-up data.
 - **Keep source and transpiled separate.** *Why:* they give the same counts, but they are different files with different code. Keeping both lets every row point back to its own file, and we can check that the two versions agree.
+- **Record locators are line numbers, not statement indexes.** A `source_record_id` ends in `#L17.0`, meaning line 17 and the first statement on that line. *Why:* a statement index depends on what a parser decides a statement is, and ours disagreed with each other (see Limitations). A line number is a property of the file, so it cannot drift when someone changes the parser, and a reader can check it by opening the file and counting. The `.0` suffix is needed because OpenQASM allows several statements on one line, as in `cx d1,a1; cx d2,a1;`. We changed this while no Silver output existed yet, which cost nothing; after Gold was loaded it would have moved every identifier.
+- **One tokenizer for all three QASMBench tables.** *Why:* the three tables read the same file format, and keeping three readers is how they came to disagree in the first place. The shared functions also made the counting rules, such as expanding a macro call or a whole-register measure, apply the same way everywhere instead of once per table.
+- **Count two-qubit gates by operand count, not by a list of gate names.** An operation with exactly two qubit operands is a two-qubit operation. *Why:* `cx`, `cz`, `swap` and anything else are handled without us maintaining a list that will go stale. We cross-checked it against a version that did use a hardcoded list, and both give 49, 10 and 4.
 
 # ML input tables
 
@@ -481,7 +490,7 @@ All three sources passed validation without a single rejected row. In total 325,
 | `stabilizer_check`       | QASMBench | 4           | 4           | 0        |
 | **Total**                |           | **325,619** | **325,619** | **0**    |
 
-The counts come from `results/part1/row_counts.json`. The `data_issues` table holds 80 warnings, and all of them come from QASMBench (see below). The rest of this section describes the findings for each source.
+The counts come from `results/part1/row_counts.json`. The `data_issues` table holds a single warning, from the syndrome source (see below). The rest of this section describes the findings for each source.
 
 ## Google
 
@@ -493,9 +502,9 @@ All 5 experiments and all 250,000 shots were accepted, and the Google data raise
 
 ## Syndromes
 
-All 7 files and all 75,598 rows were accepted, and the syndrome data raised no issues.
+All 7 files and all 75,598 rows were accepted. One warning was logged.
 
-- **Header differs from the documentation.** The README documents a column called `label`, but the files have `labels`. Our reader expects `labels`, and stops with an error if the header is anything else, so a changed header cannot slip through unnoticed.
+- **Header differs from the documentation.** The README documents a column called `label`, but the files have `labels`. The assignment lists this as a check we have to implement, so it is recorded in `data_issues` as a warning with the action `accepted`: the header is authoritative, the data is fine, and the mismatch is still visible. We log it once for the archive rather than seven times, since it describes the release and not any one file. The reader also still stops if `labels` is missing altogether, so a genuinely broken header cannot slip through.
 - **Shape.** Every syndrome is 4 rounds of 4 binary check values, which we turn into 16 bits.
 - **Weights.** Every `quantity` is positive (the smallest is 1).
 - **Totals.** Each file adds up to exactly 10,000,000 weighted observations, so the total-quantity warning never fired.
@@ -507,11 +516,9 @@ All 16 QASMBench rows were accepted and none were rejected.
 
 - **Only `qec_sm_n5` has checks and corrections.** It gives all 4 `stabilizer_check` rows (2 per variant) and all 6 `conditional_correction` rows (3 per variant). The other four files have no `if` statements or parity checks, so they produce a `circuit` row and nothing else. This is not data loss.
 - **Counts match the raw files.** A text scan of the archive finds `if(` on exactly 6 lines, matching the 6 corrections. Source and transpiled files also give the same qubit, measurement and two-qubit gate counts for every benchmark.
-- **80 warnings, all from `qasm_circuit_known_gate`.** This rule warns when a gate is not defined in the circuit or in `qelib1.inc`:
-  - **74 for `sx`** (62 in `error_correctiond3_n5_transpiled`, 12 in `qec_en_n5_transpiled`). The transpiler introduced this gate and `qelib1.inc` does not list it, so we kept the rows.
-  - **6 for `if`** (3 in each `qec_sm_n5` file). These are false alarms: the check treats each `if` statement as a gate. The rows are correct.
+- **No warnings.** `qasm_circuit_known_gate` used to log 80, and all 80 were faults in the rule rather than problems with the circuits. `sx` is a real basis gate that this release's `qelib1.inc` predates, and `if` is not a gate at all. Both are fixed, and the rule now passes cleanly on all six circuits. See "Result of the run" above for what changed.
 - **Rules are tested.** Each rule is tested with a crafted bad input in `tests/test_qasmbench.py`, since no real row was rejected.
-- **`run.json` shows `issue_count: 80` for the `prepare_data` stage.** This is the number of rows in `data_issues.parquet`, so it includes the warnings. Rejected rows are counted separately in `row_counts.json`, and that is 0 for every table.
+- **`run.json` shows `issue_count: 1` for the `prepare_data` stage.** This is the number of rows in `data_issues.parquet`, so it includes warnings as well as rejections. Rejected rows are counted separately in `row_counts.json`, and that is 0 for every table.
 - 
 # Worked traces
 
@@ -630,7 +637,10 @@ The "checks that fired" column is derived in SQL. The classical register `syn` i
 - **QASMBench has no results.** The six QASMBench files only describe circuits. They have no measured outcomes, so we could not link them to the Google or syndrome data. Only `qec_sm_n5` has classical feedback, so only 2 of the 6 files gave useful output.
 - **Syndrome data is stored in groups.** The 70 million observations come as 75,598 weighted rows. We kept them grouped (as specified), so we cannot see individual observations, and any rate we calculate has to use the weights.
 - **Google data is small.** There are only 5 experiments, and just one is at distance 5. So comparing distances only gives a rough idea.
-- **Some warnings are false alarms.** The gate check logs 80 warnings. 74 are for the gate `sx`, which is real but not listed in `qelib1.inc`. The other 6 come from `if` statements that the check mistakes for gates. The data is not affected, but the warning count is higher than the real number of problems.
+- **We wrote the same parser three times.** The three QASMBench tables were split between us, and each of us wrote a private tokenizer for the same OpenQASM text. They disagreed about what counts as a statement: one skipped `barrier` but counted the `gate` header line, another did the reverse. Because the record locator was a statement index, the same `if(syn==1) x q[0];` line was statement 13 to one table and 14 to another, so two Silver tables disagreed about where one Bronze statement was. On `qec_sm_n5.qasm` the two differences happened to cancel out, so it looked fine, and it only showed on the transpiled file. Nothing crashed and nothing looked wrong. We found it by chance while comparing identifiers. Splitting work by table made this easy to miss, and if we did it again we would agree one parser for a shared format before splitting the tables that use it.
+- **Validating the gate check needed the data to argue back.** Our `qasm_circuit_known_gate` rule compared gate names against the `qelib1.inc` in the archive, which seemed like the careful choice because it reads the gate set from the release instead of a list we invent. It still produced 80 warnings, and all 80 were wrong: `sx` is a real gate that this copy of `qelib1.inc` predates, and `if` is not a gate at all. We had written the rule up as a known limitation before realising it was simply a bug. The lesson is that a check with a plausible justification can still be wrong, and a warning count that large is a signal to re-read the rule rather than explain it.
+- **Gold queries could not be tested until the Gold schema existed.** The Q3 queries depend on the QASMBench Gold tables, which were a separate piece of work on a separate branch. To avoid committing SQL we had never executed, we built the schema in a scratch Postgres schema, loaded the three Silver tables into it and ran the queries there before merging. It worked, but it is a slow way to test, and ordering the work so the schema lands before the queries would have been better.
+- **The pipeline needs the full 8 GB.** The assignment asks for at least 8 GB available to Docker, and that is not advisory. With less, the Google shot stage is killed by the kernel part way through (exit 137) because unpacking 250,000 shots of 209 bits holds a lot in memory at once. On a machine with 1.9 GB we could run the syndrome and QASMBench tables on their own but not the whole stage.
 
 # Rerun Evidence
 
@@ -676,16 +686,30 @@ Running plain `make run` in a normal terminal on your own machine fails with `No
 | Hash, size, missing-file or unsafe-name error | This stops the run on purpose. Restore the original course data with `make seed` and rerun |
 | Old data in PostgreSQL | Rerunning is safe, because Gold is reloaded every run. For a fresh start, run `make reset-platform` then `make bootstrap` |
 
-The 80 warnings in `data_issues.parquet` are expected (see Cleaning and validation rules).
+The single warning in `data_issues.parquet` is expected (see Cleaning and validation rules).
 
 ## How the tests cover the tables
 
-The tests in `starter/tests/` use small made-up inputs and run offline.
+The tests in `starter/tests/` use small made-up inputs and run offline. Each one builds a tiny zip in memory rather than reading Bronze, so the whole suite finishes in under a second and does not need the object store.
 
 - `test_google_experiment.py` and `test_google_shot.py`: the Google `experiment` and `shot` tables, including rejected and stopped cases
 - `test_formats.py`: the `.b8` and `.01` file readers
-- `test_qasmbench.py`: the QASMBench tables
+- `test_qasmbench.py`: the three QASMBench tables
+- `test_syndrome.py`: the `syndrome_observation` table
 - `test_ml.py`, `test_models.py`, `test_config.py`: Part II helpers, record hashing and settings
+
+**Why every rule has a made-up failure.** No row in the release is rejected by any rule. That is good news about the data, but it means a real run proves nothing about whether the rules work: a rule that never fires looks exactly like a rule that cannot fire. So each one gets an input built to trip it. For QASMBench that is a condition value outside its register width, a two-qubit target where the contract allows one, a whole-register target, an undeclared register and an out-of-range index. For the syndromes it is a three-round syndrome, a five-round syndrome, a short round, a non-binary value, an unparseable string and a zero or negative count.
+
+**The two tests that matter most** are the ones for mistakes that do not raise anything:
+
+- **Bit order.** The syndrome has to be flattened by round and then by check. Flatten it the other way and you still get a valid 16-byte value, just scrambled, and nothing anywhere complains. The test fires a single check in a single round and asserts the bit lands at index 2 rather than index 8, which is where a check-major flatten would put it.
+- **The aggregate grain.** One CSV row has to stay one Silver row, and the same syndrome under both labels has to stay two rows. Both are easy to "tidy up" by accident, and both change what every later rate means.
+
+**Cross-table tests.** Three tests in `test_qasmbench.py` assert that the circuit, stabilizer-check and conditional-correction tables agree on the position of the same statement. These exist because they did not agree once (see Limitations), and the disagreement was invisible in a normal run.
+
+**Repeatability.** Each table has a test that parses the same bytes twice and compares the rows, so an identifier that depended on run time or row order would fail immediately rather than at the rerun check.
+
+At the time of writing the suite is 101 tests.
 
 # AI usage
 
