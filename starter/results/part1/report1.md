@@ -92,8 +92,11 @@ Our architecture follows the stages of the quantum_lake_student package. Everyth
 
 In *register_sources.py*  
 The three course data sources are checked against the course bundle-manifest.json (file size and SHA-256). Unsafe zip members are rejected. Verified files are stored unchanged in the Bronze layer in MinIO.
+
 After that in *prepare_data.py* Each source is read from Bronze and cleaned, validated and converted into Silver Parquet tables: six tables, plus a shared data_issues table and a source_trace table. Every Silver row gets a source_record_id so it can be traced back to its original file.
+
 For the third step, once all Silver tables exist, in *load_postgres.py* the Gold schema in PostgreSQL is created and filled from Silver. This uses bulk COPY inside one transaction, and tables are emptied and reloaded on each run. Gold has 13 tables.
+
 Further, ML tables are constructed in *build_ml_tables.py* SQL views over Gold only are exported as Parquet files in ml/. Contract checks run on them before they are written.
 Finally, in *analysis.py* Every SQL file in sql/analysis/ is run on Gold and its result is saved as a CSV in results/part1/analysis/.
 
@@ -250,30 +253,30 @@ We store the pattern once and keep the label and the count on the observation, f
 
 The price is one extra table and two joins whenever we need the bits together with the label. In return, the database prevents impossible values: a quantity must be positive, a pattern must have exactly 4 rounds and 4 checks, and an observation cannot point to an experiment or a pattern that does not exist.
 
+Two indexes, on `syndrome_observation(experiment_id)` and `syndrome_observation(pattern_id)`, support reading all observations of one experiment or one pattern.
+
 ### QASMBench
 
-The QASMBench tables form their own group in Gold. They are linked to each other by `circuit_id`, which has the form `qasmbench:<benchmark>:<variant>`, and have no foreign key to the Google or syndrome tables (see the rejected relationship section).
+The QASMBench tables form their own group in Gold. They are linked to each other by `circuit_id` (`qasmbench:<benchmark>:<variant>`) and have no foreign key to the Google or syndrome tables (see the rejected relationship section).
 
-The central table is **circuit**. It holds one row per circuit file (6 rows: 3 benchmarks, each in a `source` and a `transpiled` variant), with the qubit, measurement and two-qubit gate counts. A check constraint only allows the variants `source` and `transpiled`, and the pair (`benchmark_name`, `variant`) must be unique.
+Silver stores the registers as text (for example `qreg q[3]; qreg a[2]`) and a check's syndrome bit as text (`syn[0]`). Gold splits both into proper tables and columns, so the database can check that every qubit and register a row mentions exists in the same circuit.
 
-The Silver `circuit` table stores the registers as text (for example `qreg q[3]; qreg a[2]`). In Gold this text is split into two tables:
+| Table                         | One row is                                         | Key and constraints                                                                                                                                         |
+|-------------------------------|----------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `circuit`                     | One circuit file (6 rows: 3 benchmarks × `source`/`transpiled`) | Primary key `circuit_id`. `variant` must be `source` or `transpiled`. (`benchmark_name`, `variant`) is unique.                                  |
+| `circuit_register`            | One declared register (`q`, `a`, `c`, `syn`)       | Primary key (`circuit_id`, `register_order`). (`circuit_id`, `register_name`) is unique. `register_type` is `qreg` or `creg`.                                |
+| `circuit_qubit`               | One qubit of a quantum register (`q[0]`, `a[1]`, …) | Primary key (`circuit_id`, `qubit_name`). Foreign key (`circuit_id`, `register_name`) points to `circuit_register`.                                         |
+| `stabilizer_check`            | One parity check                                   | Primary key (`circuit_id`, `check_id`). The ancilla must exist in `circuit_qubit` and the syndrome register in `circuit_register`. `syndrome_index` is split out of `syn[0]` so queries can use it as a number. |
+| `stabilizer_check_data_qubit` | One (check, data qubit) pair                       | Primary key (`circuit_id`, `check_id`, `data_qubit`). It has its own table because a list in one column cannot be joined or constrained.                     |
+| `conditional_correction`      | One `if(register == value) gate target` statement | Primary key `source_record_id`. The condition register and the target qubit must exist in the same circuit.                                                  |
 
-- **circuit_register** has one row per declared register (`q`, `a`, `c`, `syn`) with its type (`qreg` or `creg`), size and declaration order.
-- **circuit_qubit** has one row per individual qubit (`q[0]`, `q[1]`, `a[0]`, ...). Only quantum registers create qubit rows.
-
-These two tables let the database check the other tables. An ancilla, a data qubit or a correction target cannot be stored unless that qubit exists in the same circuit, and a syndrome or condition register cannot be named unless it is declared.
-
-The **stabilizer_check** table has one row per parity check. It stores the ancilla qubit that does the check, plus the classical register and index where its result is written. Silver stores this as one text value (`syn[0]`). Gold splits it into `syndrome_register` and `syndrome_index`, because the analysis query needs the index as a number.
-
-A check reads from one or more data qubits. A list in one column could not be joined or constrained, so they go in their own junction table, **stabilizer_check_data_qubit**, with one row per (check, data qubit).
-
-The **conditional_correction** table has one row per `if(register == value) gate target` statement. Its condition register and its target qubit are foreign keys into `circuit_register` and `circuit_qubit`, so a correction can only point at things that exist in its circuit.
+Three indexes on `circuit_id` (on `circuit_qubit`, `stabilizer_check` and `conditional_correction`) support reading everything that belongs to one circuit, which is what Q3 does. 
 
 Design choices:
 
-- This adds extra tables and joins compared with one wide circuit table. In return, the database enforces consistency, and the query "which data qubits feed which check, and which correction repairs them" is a plain join.
-- Source and transpiled circuits are both kept, because they are separate files with different statements. Merging them would break the link back to the exact file.
-- The value `syn == 0` has no correction row. No check fired, so there is nothing to repair.
+- **More tables, more consistency.** Splitting the circuit into several tables means more joins than one wide table. In return, the database checks that every qubit and register exists, and "which data qubits feed which check, and which correction repairs them" is a plain join.
+- **Source and transpiled are kept separate.** They are different files, so each row keeps its link to its own file.
+- **No row for `syn == 0`.** No check fired, so there is nothing to repair.
 
 ## ER diagram of the Gold tables
 
@@ -351,7 +354,6 @@ erDiagram
 ```mermaid
 erDiagram
   CIRCUIT ||--o{ CIRCUIT_REGISTER : "declares"
-  CIRCUIT ||--o{ CIRCUIT_QUBIT : "contains"
   CIRCUIT_REGISTER ||--o{ CIRCUIT_QUBIT : "holds"
   CIRCUIT ||--o{ STABILIZER_CHECK : "has"
   CIRCUIT ||--o{ CONDITIONAL_CORRECTION : "has"
@@ -420,7 +422,7 @@ erDiagram
 - **Keep the weighted rows.** We keep the 75,598 aggregate rows with their `quantity` and do not expand them to 70 million. *Why:* the assignment says not to, and every rate is then a weighted sum.
 - **Pattern stored once, label on the observation.** The bits live in `syndrome_pattern`, and the label and weight live in `syndrome_observation`. *Why:* the same pattern appears with both labels in the same experiment, so the label belongs to the observation, not to the pattern.
 - **Fixed bit order.** The syndrome is stored as 16 bits ordered by round and then by check. *Why:* this is the order the assignment fixes for the ML table, so the bits can be used without reordering.
-- 
+
 **QASMBench**
 
 - **Keep all 6 circuits.** Every file has a row in `circuit`. *Why:* the circuit table only describes what is in each file, and every file does have that. Dropping the others would lose information, and the files with no checks or corrections are still useful to show.
@@ -501,47 +503,16 @@ All 7 files and all 75,598 rows were accepted, and the syndrome data raised no i
 
 ## QASMBench
 
-### Row counts
+All 16 QASMBench rows were accepted and none were rejected.
 
-All QASMBench rows passed validation: nothing was rejected.
-
-| Table                    | Read | Accepted | Rejected |
-|--------------------------|------|----------|----------|
-| `circuit`                | 6    | 6        | 0        |
-| `conditional_correction` | 6    | 6        | 0        |
-| `stabilizer_check`       | 4    | 4        | 0        |
-
-Only two of the six circuit files produce rows in `conditional_correction` and `stabilizer_check`: the source and transpiled versions of `qec_sm_n5`. This is the only benchmark with classical feedback. The other four files (`error_correctiond3_n5` and `qec_en_n5`, each in two variants) contain no `if` statements and no parity checks, so they correctly produce a `circuit` row and nothing else. These empty results are not data loss.
-
-| File                                         | `circuit` | `conditional_correction` | `stabilizer_check` |
-|----------------------------------------------|-----------|--------------------------|--------------------|
-| `error_correctiond3_n5` (source, transpiled) | 1 each    | 0                        | 0                  |
-| `qec_en_n5` (source, transpiled)             | 1 each    | 0                        | 0                  |
-| `qec_sm_n5` (source, transpiled)             | 1 each    | 3 each                   | 2 each             |
-
-We checked the counts against the raw files. A text scan of the whole archive finds `if(` on exactly 6 lines, which matches the 6 rows in `conditional_correction`. The 4 stabilizer checks are the 2 parity checks of `qec_sm_n5`, counted once per variant. Source and transpiled files also give the same qubit, measurement and two-qubit gate counts for every benchmark, which is a useful consistency check because transpiling changes how gates are written, not how many there are.
-
-### Warnings and rejected rows
-
-No QASMBench row was rejected, but `data_issues` contains 80 warnings. All of them come from one rule, `qasm_circuit_known_gate`, which warns when a gate name is not defined in the circuit or in the gate library `qelib1.inc`.
-
-| File                                   | Warnings            | Gate name flagged | Meaning                   |
-|----------------------------------------|---------------------|-------------------|---------------------------|
-| `error_correctiond3_n5_transpiled`     | 62                  | `sx`              | Real finding              |
-| `qec_en_n5_transpiled`                 | 12                  | `sx`              | Real finding              |
-| `qec_sm_n5` and `qec_sm_n5_transpiled` | 3 each (6 in total) | `if`              | Probably a false positive |
-
-- **`sx` (74 warnings):** this gate appears only in the transpiled files. The transpiler introduced it, and `qelib1.inc` does not declare it. We accepted these rows because an unknown gate name is more likely a gap in our gate list than a broken circuit. This is why the rule is a warning and not an error.
-- **`if` (6 warnings):** `if` is the keyword for a conditional statement, not a gate. The count is 3 per file, which equals the number of conditional statements in each file, so the rule is most likely treating each `if` statement as a gate. These rows are correct and also appear in `conditional_correction`.
-
-Each validation rule is also tested with a crafted bad input in `tests/test_qasmbench.py`. This shows that the rules work even though none of them rejected a real row.
-
-### Known gaps
-
-- The rule `qasm_circuit_known_gate` does not recognise the `if` statement, so it produces 6 warnings that are not real problems.
-- `run.json` reports `issue_count: 0` for every stage, while `data_issues.parquet` holds 80 warnings. The counter only counts rejections, not warnings.
-- Only one of the three benchmarks contains classical feedback, so the correction and check logic has been checked on a single circuit family.
-
+- **Only `qec_sm_n5` has checks and corrections.** It gives all 4 `stabilizer_check` rows (2 per variant) and all 6 `conditional_correction` rows (3 per variant). The other four files have no `if` statements or parity checks, so they produce a `circuit` row and nothing else. This is not data loss.
+- **Counts match the raw files.** A text scan of the archive finds `if(` on exactly 6 lines, matching the 6 corrections. Source and transpiled files also give the same qubit, measurement and two-qubit gate counts for every benchmark.
+- **80 warnings, all from `qasm_circuit_known_gate`.** This rule warns when a gate is not defined in the circuit or in `qelib1.inc`:
+  - **74 for `sx`** (62 in `error_correctiond3_n5_transpiled`, 12 in `qec_en_n5_transpiled`). The transpiler introduced this gate and `qelib1.inc` does not list it, so we kept the rows.
+  - **6 for `if`** (3 in each `qec_sm_n5` file). These are false alarms: the check treats each `if` statement as a gate. The rows are correct.
+- **Rules are tested.** Each rule is tested with a crafted bad input in `tests/test_qasmbench.py`, since no real row was rejected.
+- **`run.json` shows `issue_count: 80` for the `prepare_data` stage.** This is the number of rows in `data_issues.parquet`, so it includes the warnings. Rejected rows are counted separately in `row_counts.json`, and that is 0 for every table.
+- 
 # Worked traces
 
 ## Google shot trace
@@ -593,7 +564,7 @@ The assignment asks three questions, which we answer with reproducible SQL again
 - The weighted logical-error rate rises steadily with the physical fault rate, from 0.0234% at 1e-5 to 18.7% at 1e-2. At low fault rates it is about 23 times the fault rate (0.000234 / 0.00001 = 23.4; 0.0227 / 0.001 = 22.7). At 1e-2 the ratio drops to about 18.7, so the rise slows at higher fault rates.
 - The share of observations with the all-zero syndrome falls from 99.9% to 28%, so a rising fault rate goes together with more non-trivial syndromes.
 - The number of distinct syndromes grows from 68 to 31,466. This is why the data are stored as weighted rows and why the Gold design keeps each pattern once.
-- A few logical errors occur with an all-zero syndrome (2 at 5e-4, up to 1,010 rows at 1e-2). The 16 syndrome bits cannot reveal these errors.
+- A few logical errors occur with an all-zero syndrome (2 at 5e-4, up to 1,010 observations at 1e-2). The 16 syndrome bits cannot reveal these errors.
 - Each file adds up to exactly 10,000,000 weighted observations, which confirms the weights are handled correctly.
 - Only distance 3 is available for the syndrome data, so this comparison says nothing about different code distances.
 
@@ -613,7 +584,7 @@ Every row covers 50,000 shots per decoder.
 
 **What it shows:**
 
-- The order of the decoders is the same in all five experiments. Tensor-network contraction and belief matching have the lowest error rates (within about one percentage point of each other), correlated matching comes next, and PyMatching has the highest.
+- PyMatching has the highest error rate in all five experiments, and correlated matching is the next highest in all five. Tensor-network contraction and belief matching have the lowest rates, within about one percentage point of each other. Tensor-network contraction is lower in four experiments and belief matching in one (patch centre (7, 5)).
 - All four decoders disagree with the actual observable flip on roughly 38% to 45% of shots, so they are only moderately better than guessing.
 - Among the four distance-3 locations, the error rates differ by up to about three percentage points for the same decoder (for example 0.388 to 0.416 for belief matching).
 - The distance-5 experiment does not show lower error rates than the distance-3 experiments (0.3955 to 0.4510 against 0.3839 to 0.4432). In this data, a larger distance is not associated with a lower decoder error rate.
@@ -678,43 +649,43 @@ count, the number of distinct keys and a hash of all keys.
 
 # Commands to run
 
-Run these in order.
+Run these in order. The pipeline needs the project's Python environment and the PostgreSQL and MinIO services, which exist inside the `workspace` container. You can run the commands in either of two places:
 
-| Where      | Command                                                                                     | What it does                                                                                                                                                                                                                           |
-|------------|---------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Repo root  | `make bootstrap`                                                                            | Starts PostgreSQL, MinIO, Adminer and JupyterLab, copies the course data into Bronze, and checks that everything is ready.                                                                                                             |
-| `starter/` | `make run`                                                                                  | Runs the whole pipeline: checks and stores the source files (Bronze), builds the Silver tables, loads Gold into PostgreSQL, builds the ML tables and runs the SQL analyses. It takes about 34 seconds. Results go to `results/part1/`. |
-| `starter/` | `make train`                                                                                | Trains and evaluates the Part II models from the ML tables. Results go to `results/part2/`.                                                                                                                                            |
-| `starter/` | `make test`                                                                                 | Runs the automated tests.                                                                                                                                                                                                              |
-| Repo root  | `make run` twice, running `sql/rerun_check/check.sql` after each (see the previous section) | Check that a second run gives the same rows and IDs. The two outputs, `results/part1/rerun/run1.txt` and `run2.txt`, should be the same.                                                                                               |
+- **JupyterLab terminal** (`http://localhost:8888`). It opens inside the `workspace` container, so you run `make ...` directly.
+- **Your own terminal, at the repo root.** Put `docker compose exec workspace` in front of the command.
+
+| Step | JupyterLab terminal | Your own terminal (repo root) | What it does |
+|------|---------------------|-------------------------------|--------------|
+| 1. Start the platform | not needed | `make bootstrap` | Starts PostgreSQL, MinIO, Adminer and JupyterLab, copies the course data into Bronze, and checks that everything is ready. Run it once, on your own machine, before anything else. |
+| 2. Run Part I | `make run` | `docker compose exec workspace make run` | Runs the whole pipeline: checks and stores the source files (Bronze), builds the Silver tables, loads Gold into PostgreSQL, builds the ML tables and runs the SQL analyses. It takes about 34 seconds. Results go to `results/part1/`. |
+| 3. Run Part II | `make train` | `docker compose exec workspace make train` | Trains and evaluates the Part II models from the ML tables. Results go to `results/part2/`. Run it after step 2. |
+| 4. Run the tests | `make test` | `docker compose exec workspace make test` | Runs the automated tests. |
+| 5. Check a rerun | `make run` twice, running `sql/rerun_check/check.sql` after each | `docker compose exec workspace make run` twice, running `sql/rerun_check/check.sql` after each | Checks that a second run gives the same rows and IDs (see the previous section). The two outputs, `results/part1/rerun/run1.txt` and `run2.txt`, should be the same. |
+
+Running plain `make run` in a normal terminal on your own machine fails with `No module named quantum_lake_student`, because the Python environment is only inside the container.
 
 # Troubleshooting
 
 ## What can go wrong when running the pipeline
 
-| Problem                                                            | Why it happens                                                                                         | What to do                                                                                                                                                                                |
-|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `make run` or `make train` cannot connect                          | PostgreSQL or MinIO is not running, because `make bootstrap` was not run or the services were stopped  | Run `make bootstrap` at the repo root, then `make check` in `starter/` to confirm both are reachable                                                                                      |
-| `python: command not found`                                        | The `starter/` Makefile calls `python`, and some systems only have `python3`                           | Run `make run PYTHON=python3` (the same works for `train` and `test`)                                                                                                                     |
-| `make train` fails because ML tables are missing                   | Part II reads the tables that `make run` creates, so it was run first                                  | Run `make run`, then `make train`                                                                                                                                                         |
-| The run stops at the start with a hash or size error               | A source zip does not match the course `bundle-manifest.json`, so it was changed or is incomplete      | Re-copy the original course data (`make seed` at the repo root, or `make inventory` to see what is there). The check is on purpose, because we must not process unverified data.          |
-| The run stops with an error about a missing file or an unsafe name | A required companion file is missing, or a zip member has an unsafe path                               | This is on purpose. The assignment says these cases must stop the run. Fix the input data and rerun.                                                                                      |
-| Row counts do not match the report                                 | The data or the code revision changed                                                                  | Compare `results/part1/row_counts.json` and `run.json`, which record the counts, the input hashes and the code revision of each run                                                       |
-| `data_issues.parquet` contains 80 warnings                         | These are expected: 74 for the gate `sx` and 6 for `if` statements (see Cleaning and validation rules) | No action needed. No rows are rejected.                                                                                                                                                   |
-| Old data in PostgreSQL                                             | An earlier run left rows behind                                                                        | Rerunning is safe. Gold is emptied and reloaded on every run. For a completely fresh start, `make reset-platform` removes the containers and their data, then run `make bootstrap` again. |
+| Problem | What to do |
+|---|---|
+| Cannot connect to PostgreSQL or MinIO | Run `make bootstrap` at the repo root, then run the command again |
+| `No module named quantum_lake_student` | You ran `make` on your own machine. Run it in the JupyterLab terminal, or put `docker compose exec workspace` in front of the command |
+| `make train` says ML tables are missing | Run `make run` first, then `make train` |
+| Hash, size, missing-file or unsafe-name error | This stops the run on purpose. Restore the original course data with `make seed` and rerun |
+| Old data in PostgreSQL | Rerunning is safe, because Gold is reloaded every run. For a fresh start, run `make reset-platform` then `make bootstrap` |
+
+The 80 warnings in `data_issues.parquet` are expected (see Cleaning and validation rules).
 
 ## How the tests cover the tables
 
-The tests in `starter/tests/` build small made-up inputs and run offline, so they need no database or MinIO.
+The tests in `starter/tests/` use small made-up inputs and run offline.
 
-| Test file                          | What it covers                                                                                                                                                                            |
-|------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `test_google_experiment.py`        | The Google `experiment` table: valid folders, column types, the ID format, a trace row back to Bronze, and rejection of missing or incomplete `properties.yml`                            |
-| `test_google_shot.py`              | The Google `shot` table: valid shots are published, non-zero padding rejects only that shot, a length mismatch rejects the experiment's shots, and a missing companion file stops the run |
-| `test_formats.py`                  | The `.b8` and `.01` readers: byte alignment, little-endian bit order, partial records and non-binary values                                                                               |
-| `test_qasmbench.py`                | The QASMBench tables: gate expansion, register reading, line locators, stable IDs, and rejected versus warned rules                                                                       |
-| `test_ml.py`                       | The Part II helpers: unpacking bits, train/test splits and weighted error rates                                                                                                           |
-| `test_models.py`, `test_config.py` | Record hashing, stage results and settings                                                                                                                                                |
+- `test_google_experiment.py` and `test_google_shot.py`: the Google `experiment` and `shot` tables, including rejected and stopped cases
+- `test_formats.py`: the `.b8` and `.01` file readers
+- `test_qasmbench.py`: the QASMBench tables
+- `test_ml.py`, `test_models.py`, `test_config.py`: Part II helpers, record hashing and settings
 
 # AI usage
 
