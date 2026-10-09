@@ -244,7 +244,10 @@ def load_syndromes(cur, df_syn: pd.DataFrame) -> None:
     copy_rows(cur, "syndrome_experiment", ["experiment_id", "distance", "physical_fault_rate"], experiment_rows)
 
     df_syn = df_syn.copy()
-    df_syn["pattern_id"] = df_syn["syndrome_bits"].apply(lambda b: f"pat_{hashlib.md5(b).hexdigest()[:12]}")
+    pattern_ids = []
+    for bits in df_syn["syndrome_bits"]:
+        pattern_ids.append(f"pat_{hashlib.md5(bits).hexdigest()[:12]}")
+    df_syn["pattern_id"] = pattern_ids
     patterns = df_syn[["pattern_id", "syndrome_bits", "round_count", "check_count"]].drop_duplicates("pattern_id")
     pattern_rows = []
     for r in patterns.itertuples():

@@ -41,15 +41,30 @@ Altogether we processed 325,619 rows, and all of them were accepted. The full ru
 
 ## **Google surface-code source**
 
-- The Google data contains 5 directories, one for each experiment (4 with code distance 3 and 1 with distance 5). Each directory has a `properties.yml` file with the experiment's metadata, which becomes the `experiment` table in the Silver stage.
+The Google data contains 5 directories, one for each experiment (4 with code distance 3 and 1 with distance 5). Each experiment has many shots, which gives the one-to-many relationship used in the Gold schema.
+
+### Experiment table
+
+- Each directory has a `properties.yml` file with the experiment's metadata, which becomes the `experiment` table in the Silver stage.
 - Each experiment row is identified by `experiment_id` and a `source_record_id` that links back to its `properties.yml` file.
 - One experiment row describes:
   - the chip region where the experiment was run (`center_row`, `center_col`),
   - the measurement basis (`basis`) and the error-protection level (code distance),
   - the number of runs (`shots`) and the number of times the cycle was repeated within each shot (`rounds`),
   - the number of raw readout bits per shot (`measurement_count`) and the number of detector-event bits per shot (`detector_count`).
-- Each experiment has many shots, which gives the one-to-many relationship used in the Gold schema.
-- **Problem we found :** the detector events are stored as packed bits (the Stim `b8` format), with 8 bits per byte, the lowest bit first, and zero padding in the last byte. Unpacking them in the wrong order gives wrong values without any error message. Detector events, raw measurements and decoder predictions are also three different things and must not be mixed up. 
+<img src="./Dataflow.jpeg" alt="Data flow for the Google source" width="300" align="right">
+
+<br/>
+
+### Shot table
+
+Each of the 250,000 shots is one row in `silver/google_qec/shot.parquet`. Each shot's `measurement_bits`, `sweep_bits` and `detector_bits` are read from the experiment's three `.b8` files, `detector_event_count` is counted from the detector bits, `actual_observable_flip` and the four decoder predictions each come from their own `.01` file, `experiment_id` is `google_` plus the experiment folder name, and `source_record_id` is a hash of the experiment and shot number.
+
+- **Problem we found :** - The bits are packed with the lowest bit first, so unpacking in the wrong order gives wrong values without any error. Detector events, raw measurements and decoder predictions are three different things and are kept in separate columns.
+
+
+- The hardware readings for a shot are a long string of 0s and 1s, like 0100101.... A shot with 13 bits needs 2 bytes, which is 16 bits, so the last 3 bits are filler zeros. Those filler bits aren't real readings. If we read them as real data, the counts come out slightly wrong. So in Silver we check that the filler bits are zero and reject the shot if not, and when the ML step unpacks the bytes, it keeps only the real bits and throws the filler away.
+
 
 ## **Syndrome source**
 
@@ -73,16 +88,16 @@ Altogether we processed 325,619 rows, and all of them were accepted. The full ru
 We used the course architecture without changes: raw files in Bronze, cleaned and validated tables in Silver, a PostgreSQL model in Gold that we designed ourselves, and the ML tables built from Gold for Part II.
 ## Pipeline and data flow
 
-Our architecture follows the stages of the `quantum_lake_student` package. Everything starts in `cli.py`, where `run_pipeline` calls each stage in order, and `make run` triggers it.
+Our architecture follows the stages of the quantum_lake_student package. Everything starts in cli.py, where run_pipeline calls each stage in order, and make run triggers it.
 
-1. **Register (`register_sources.py`).** The three course data sources are checked against the course `bundle-manifest.json` (file size and SHA-256). Unsafe zip members are rejected. Verified files are stored unchanged in the Bronze layer in MinIO.
-2. **Prepare (`prepare_data.py`).** Each source is read from Bronze and cleaned, validated and converted into Silver Parquet tables: six tables, plus a shared `data_issues` table and a `source_trace` table. Every Silver row gets a `source_record_id` so it can be traced back to its original file.
-3. **Load (`load_postgres.py`).** Once all Silver tables exist, the Gold schema in PostgreSQL is created and filled from Silver. This uses bulk `COPY` inside one transaction, and tables are emptied and reloaded on each run. Gold has 13 tables.
-4. **Build ML tables (`build_ml_tables.py`).** SQL views over Gold only are exported as Parquet files in `ml/`. Contract checks run on them before they are written.
-5. **Analyse (`analysis.py`).** Every SQL file in `sql/analysis/` is run on Gold and its result is saved as a CSV in `results/part1/analysis/`.
+In *register_sources.py*  
+The three course data sources are checked against the course bundle-manifest.json (file size and SHA-256). Unsafe zip members are rejected. Verified files are stored unchanged in the Bronze layer in MinIO.
+After that in *prepare_data.py* Each source is read from Bronze and cleaned, validated and converted into Silver Parquet tables: six tables, plus a shared data_issues table and a source_trace table. Every Silver row gets a source_record_id so it can be traced back to its original file.
+For the third step, once all Silver tables exist, in *load_postgres.py* the Gold schema in PostgreSQL is created and filled from Silver. This uses bulk COPY inside one transaction, and tables are emptied and reloaded on each run. Gold has 13 tables.
+Further, ML tables are constructed in *build_ml_tables.py* SQL views over Gold only are exported as Parquet files in ml/. Contract checks run on them before they are written.
+Finally, in *analysis.py* Every SQL file in sql/analysis/ is run on Gold and its result is saved as a CSV in results/part1/analysis/.
 
-The run ends by writing `run.json` with the row counts, step timings and the git revision. The ML tables are the only input to Part II (`train.py`). A full run takes about 34 seconds.
-
+The run ends by writing run.json with the row counts, step timings and the git revision. The ML tables are the only input to Part II (train.py). A full run takes about 34 seconds.
 ```mermaid
 flowchart LR
     A[Course data<br/>Google, Syndromes, QASMBench] -->|size + SHA-256 check<br/>safe zip members| B[(Bronze<br/>raw zips in MinIO)]
@@ -95,29 +110,29 @@ flowchart LR
 
 ## Stages, key functions and techniques
 
-| Stage | File | Key functions | What they do / technique used |
-|---|---|---|---|
-| Orchestrate | `cli.py` | `run_pipeline`, `command_run`, `git_revision` | Runs all stages in order, times each one and records the code revision in `run.json`. |
-| Register → Bronze | `register_sources.py` | `load_expected_manifest`, `is_safe_member`, `run` | Compares size and SHA-256 with the course manifest and rejects unsafe zip member paths before storing the raw files. |
-| Prepare: Google | `prepare_data.py` | `read_b8_rows`, `padding_is_zero`, `count_set_bits_in_bytes`, `build_experiment_rows`, `build_shot_rows` | Unpacks Stim `b8` bit-packed shots (little-endian), checks padding bits and counts detector bits to produce experiment and shot tables. |
-| Prepare: Syndromes | `prepare_data.py` | `parse_filename`, `parse_syndrome_bits`, `build_rows` | Reads metadata from CSV file names, turns the 16-bit syndromes into bit columns and keeps weighted counts instead of expanding to 70M rows. |
-| Prepare: QASMBench | `prepare_data.py` | `qasm_statements`, `qasm_registers`, `qasm_gate_definitions`, `qasm_expanded_operations`, `find_stabilizer_checks`, `validate_check`, `build_conditional_correction_rows` | Parses the OpenQASM text, expands gate definitions from `qelib1.inc`, finds stabilizer checks and conditional corrections, and builds circuit tables. |
-| Prepare: tracing | `prepare_data.py` | `shot_issue`, `source_trace` rows | Logs problems into `data_issues` and keeps `source_record_id` so every row can be traced back to its source. |
-| Load → Gold | `load_postgres.py` | `copy_rows`, `load_experiment`, `load_decoders`, `load_shots`, `load_syndromes`, `load_qasm` | Bulk `COPY FROM STDIN` into 13 Gold tables in one transaction, with `TRUNCATE ... RESTART IDENTITY CASCADE` so reruns give the same result. |
-| Build ML tables | `build_ml_tables.py` | `get_google_MlTables`, `get_syndrome_MlTable`, `validate_google_ml_table`, `validate_syndrome_ml_table` | Uses SQL views over Gold only, validates the table contract and writes Parquet to `ml/`. |
-| Analyse | `analysis.py` | `run` | Executes every `.sql` file in `sql/analysis/` and writes the results as CSV. |
-| Part II helpers | `ml.py`, `train.py` | `unpack_little_endian_bits`, `google_data_split`, `syndrome_data_split`, `weighted_logical_error_rate` | Shared splits and metrics used by the models; these are outside the Part I pipeline. |
+| Stage              | File                  | Key functions                                                                                                                                                             | What they do / technique used                                                                                                                         |
+|--------------------|-----------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Orchestrate        | `cli.py`              | `run_pipeline`, `command_run`, `git_revision`                                                                                                                             | Runs all stages in order, times each one and records the code revision in `run.json`.                                                                 |
+| Register → Bronze  | `register_sources.py` | `load_expected_manifest`, `is_safe_member`, `run`                                                                                                                         | Compares size and SHA-256 with the course manifest and rejects unsafe zip member paths before storing the raw files.                                  |
+| Prepare: Google    | `prepare_data.py`     | `read_b8_rows`, `padding_is_zero`, `count_set_bits_in_bytes`, `build_experiment_rows`, `build_shot_rows`                                                                  | Unpacks Stim `b8` bit-packed shots (little-endian), checks padding bits and counts detector bits to produce experiment and shot tables.               |
+| Prepare: Syndromes | `prepare_data.py`     | `parse_filename`, `parse_syndrome_bits`, `build_rows`                                                                                                                     | Reads metadata from CSV file names, turns the 16-bit syndromes into bit columns and keeps weighted counts instead of expanding to 70M rows.           |
+| Prepare: QASMBench | `prepare_data.py`     | `qasm_statements`, `qasm_registers`, `qasm_gate_definitions`, `qasm_expanded_operations`, `find_stabilizer_checks`, `validate_check`, `build_conditional_correction_rows` | Parses the OpenQASM text, expands gate definitions from `qelib1.inc`, finds stabilizer checks and conditional corrections, and builds circuit tables. |
+| Prepare: tracing   | `prepare_data.py`     | `shot_issue`, `source_trace` rows                                                                                                                                         | Logs problems into `data_issues` and keeps `source_record_id` so every row can be traced back to its source.                                          |
+| Load → Gold        | `load_postgres.py`    | `copy_rows`, `load_experiment`, `load_decoders`, `load_shots`, `load_syndromes`, `load_qasm`                                                                              | Bulk `COPY FROM STDIN` into 13 Gold tables in one transaction, with `TRUNCATE ... RESTART IDENTITY CASCADE` so reruns give the same result.           |
+| Build ML tables    | `build_ml_tables.py`  | `get_google_MlTables`, `get_syndrome_MlTable`, `validate_google_ml_table`, `validate_syndrome_ml_table`                                                                   | Uses SQL views over Gold only, validates the table contract and writes Parquet to `ml/`.                                                              |
+| Analyse            | `analysis.py`         | `run`                                                                                                                                                                     | Executes every `.sql` file in `sql/analysis/` and writes the results as CSV.                                                                          |
+| Part II helpers    | `ml.py`, `train.py`   | `unpack_little_endian_bits`, `google_data_split`, `syndrome_data_split`, `weighted_logical_error_rate`                                                                    | Shared splits and metrics used by the models; these are outside the Part I pipeline.                                                                  |
 
 # Silver: cleaning, validation, traceability
 
-| Table | Source | One row is | Rows |
-|---|---|---|---|
-| `google_qec/experiment` | `properties.yml` in each Google experiment folder | One surface-code experiment (basis, distance, rounds, shots, centre qubit) | 5 |
-| `google_qec/shot` | The experiment's `.b8` and `.01` files | One shot: its bits, its detector event count, the true observable flip and the four decoder predictions | 250,000 |
-| `qec_syndromes/syndrome_observation` | The 7 syndrome CSV files | One syndrome pattern in one file, with how often it was seen (`quantity`) and its logical error label | 75,598 |
-| `qasmbench/circuit` | The 6 `.qasm` files | One circuit file (3 benchmarks, source and transpiled) | 6 |
-| `qasmbench/stabilizer_check` | The QASM files | One ancilla qubit that is checked by data qubits and then measured into a syndrome bit | 4 |
-| `qasmbench/conditional_correction` | The QASM files | One `if` statement that applies a fix depending on the syndrome | 6 |
+| Table                                | Source                                            | One row is                                                                                              | Rows    |
+|--------------------------------------|---------------------------------------------------|---------------------------------------------------------------------------------------------------------|---------|
+| `google_qec/experiment`              | `properties.yml` in each Google experiment folder | One surface-code experiment (basis, distance, rounds, shots, centre qubit)                              | 5       |
+| `google_qec/shot`                    | The experiment's `.b8` and `.01` files            | One shot: its bits, its detector event count, the true observable flip and the four decoder predictions | 250,000 |
+| `qec_syndromes/syndrome_observation` | The 7 syndrome CSV files                          | One syndrome pattern in one file, with how often it was seen (`quantity`) and its logical error label   | 75,598  |
+| `qasmbench/circuit`                  | The 6 `.qasm` files                               | One circuit file (3 benchmarks, source and transpiled)                                                  | 6       |
+| `qasmbench/stabilizer_check`         | The QASM files                                    | One ancilla qubit that is checked by data qubits and then measured into a syndrome bit                  | 4       |
+| `qasmbench/conditional_correction`   | The QASM files                                    | One `if` statement that applies a fix depending on the syndrome                                         | 6       |
 
 Together this is 325,619 rows, and none were rejected. Two more tables support these: `source_trace` and `data_issues` (see Traceability).
 
@@ -133,17 +148,17 @@ We use two levels:
 - **Error (reject).** The row would be wrong or unusable. It is not written to Silver, and the problem is logged with `action = rejected`.
 - **Warning.** The row is usable but something looks odd. It is kept, and the problem is logged with `action = accepted` (or `flagged` for the syndrome total check).
 
-| Source | Check (rule name) | If it fails | Explaination |
-|---|---|---|---|
-| Google | `google_experiment_properties_present` | Error | Each experiment folder must have a `properties.yml` with all the settings we need (basis, distance, rounds, shots). Without it we can't describe the experiment. |
-| Google | `google_shot_file_format` | Error | The data files must be readable. Bit files must split into whole shots, and the prediction files may only contain 0 or 1. |
-| Google | `google_shot_companion_lengths` | Error | All the files for an experiment must have the same number of shots (50,000). If they differ, we can't match a shot to its predictions. |
-| Google | `google_shot_b8_padding_zero` | Error | Bits are packed 8 per byte, so the last byte can have spare bits. Those spare bits must be 0. If not, the data is probably corrupted. |
-| Syndromes | `syndrome_observation_row_check` | Error | Each CSV row needs a valid syndrome (a proper string of bits) and a count above 0. |
-| Syndromes | `syndrome_file_total_quantity` | Warning | The counts in a file should add up to the number in its file name (for example 10M for 10 million). If they don't, we log it but still keep the rows. |
-| QASMBench | `qasm_circuit_operand_index_in_range` | Error | A circuit can't use a qubit that doesn't exist. If it declares 3 qubits, it can't use `q[7]`. |
-| QASMBench | `qasm_cc_condition_value_in_range` | Error | In an `if(syn==3)`, the value must fit the register. A 2-bit register can't be compared to 7. |
-| QASMBench | `qasm_circuit_known_gate` | Warning | Every gate used should be one we recognise. An unknown gate looks suspicious, but the circuit may still be fine. |
+| Source    | Check (rule name)                      | If it fails | Explaination                                                                                                                                                     |
+|-----------|----------------------------------------|-------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Google    | `google_experiment_properties_present` | Error       | Each experiment folder must have a `properties.yml` with all the settings we need (basis, distance, rounds, shots). Without it we can't describe the experiment. |
+| Google    | `google_shot_file_format`              | Error       | The data files must be readable. Bit files must split into whole shots, and the prediction files may only contain 0 or 1.                                        |
+| Google    | `google_shot_companion_lengths`        | Error       | All the files for an experiment must have the same number of shots (50,000). If they differ, we can't match a shot to its predictions.                           |
+| Google    | `google_shot_b8_padding_zero`          | Error       | Bits are packed 8 per byte, so the last byte can have spare bits. Those spare bits must be 0. If not, the data is probably corrupted.                            |
+| Syndromes | `syndrome_observation_row_check`       | Error       | Each CSV row needs a valid syndrome (a proper string of bits) and a count above 0.                                                                               |
+| Syndromes | `syndrome_file_total_quantity`         | Warning     | The counts in a file should add up to the number in its file name (for example 10M for 10 million). If they don't, we log it but still keep the rows.            |
+| QASMBench | `qasm_circuit_operand_index_in_range`  | Error       | A circuit can't use a qubit that doesn't exist. If it declares 3 qubits, it can't use `q[7]`.                                                                    |
+| QASMBench | `qasm_cc_condition_value_in_range`     | Error       | In an `if(syn==3)`, the value must fit the register. A 2-bit register can't be compared to 7.                                                                    |
+| QASMBench | `qasm_circuit_known_gate`              | Warning     | Every gate used should be one we recognise. An unknown gate looks suspicious, but the circuit may still be fine.                                                 |
 
 **Result of the run.** No row was rejected in any table. All 80 issues logged were warnings, all from `qasm_circuit_known_gate`:
 
@@ -158,25 +173,25 @@ The Google and syndrome data raised no issues at all.
 
 **`source_record_id`.** Every Silver row gets an ID that is built from its source, so the same input always gives the same ID and reruns do not change it.
 
-| Table | Format | Built from |
-|---|---|---|
-| `experiment` | `exp_<12 hex>` | Hash of `google_<experiment folder name>` |
-| `shot` | `google_shot_<12 hex>` | Hash of the experiment ID and the shot number |
-| `syndrome_observation` | `syn_<12 hex>` | Hash of the Bronze file, the CSV name and the row number |
-| `circuit` | `qasmbench:<file path>` | The path of the `.qasm` file in the archive |
-| `stabilizer_check` | `qasmbench:<file path>#L<line>:check=<ancilla>` | The file, the line of the measure, and the ancilla |
-| `conditional_correction` | `qasmbench:<file path>#L<line>.<n>` | The file and the position of the `if` statement |
+| Table                    | Format                                          | Built from                                               |
+|--------------------------|-------------------------------------------------|----------------------------------------------------------|
+| `experiment`             | `exp_<12 hex>`                                  | Hash of `google_<experiment folder name>`                |
+| `shot`                   | `google_shot_<12 hex>`                          | Hash of the experiment ID and the shot number            |
+| `syndrome_observation`   | `syn_<12 hex>`                                  | Hash of the Bronze file, the CSV name and the row number |
+| `circuit`                | `qasmbench:<file path>`                         | The path of the `.qasm` file in the archive              |
+| `stabilizer_check`       | `qasmbench:<file path>#L<line>:check=<ancilla>` | The file, the line of the measure, and the ancilla       |
+| `conditional_correction` | `qasmbench:<file path>#L<line>.<n>`             | The file and the position of the `if` statement          |
 
 **`source_trace.parquet`** (2,075,625 rows). It links each row to the exact place it came from:
 
-| Column | Meaning |
-|---|---|
-| `source_record_id` | The ID of the Silver row |
-| `source_name` | `google_qec`, `qec_syndromes` or `qasmbench` |
-| `bronze_object` | The zip file in Bronze |
-| `archive_member` | The file inside the zip |
-| `record_locator` | Where in that file: `shot_index=N`, `file.csv:row=N`, a QASM line such as `L17.0`, or `whole_member` |
-| `input_sha256` | The SHA-256 of the Bronze zip, so we know which version of the file was used |
+| Column             | Meaning                                                                                              |
+|--------------------|------------------------------------------------------------------------------------------------------|
+| `source_record_id` | The ID of the Silver row                                                                             |
+| `source_name`      | `google_qec`, `qec_syndromes` or `qasmbench`                                                         |
+| `bronze_object`    | The zip file in Bronze                                                                               |
+| `archive_member`   | The file inside the zip                                                                              |
+| `record_locator`   | Where in that file: `shot_index=N`, `file.csv:row=N`, a QASM line such as `L17.0`, or `whole_member` |
+| `input_sha256`     | The SHA-256 of the Bronze zip, so we know which version of the file was used                         |
 
 There are more trace rows than Silver rows because a row can come from several places. A shot comes from 8 files, so it has 8 trace rows, and a stabilizer check comes from the several QASM lines that build it. In total there are 325,619 distinct `source_record_id` values.
 
@@ -202,12 +217,12 @@ For each shot it is also known what the four decoders have predicted in that par
 
 Each Google table has a clear meaning for one row, and the database enforces it with keys and checks:
 
-| Table | One row is | Key and constraints |
-|---|---|---|
-| `experiment` | One surface-code experiment | Primary key `experiment_id`. `source_record_id` is unique. `basis` must be `X` or `Z`, and `distance`, `rounds` and `shots` must be above 0. |
-| `shot` | One hardware shot in one experiment, with its packed bits and the true observable flip | Primary key `shot_id`. Foreign key `experiment_id` points to `experiment`. The pair (`experiment_id`, `shot_index`) is unique, so a shot cannot be stored twice. |
-| `decoder` | One of the four supplied decoders | Primary key `decoder_id`. `decoder_name` is unique. |
-| `shot_prediction` | What one decoder predicted for one shot | Primary key (`shot_id`, `decoder_id`), so each decoder has exactly one prediction per shot. Both columns are foreign keys. |
+| Table             | One row is                                                                             | Key and constraints                                                                                                                                              |
+|-------------------|----------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `experiment`      | One surface-code experiment                                                            | Primary key `experiment_id`. `source_record_id` is unique. `basis` must be `X` or `Z`, and `distance`, `rounds` and `shots` must be above 0.                     |
+| `shot`            | One hardware shot in one experiment, with its packed bits and the true observable flip | Primary key `shot_id`. Foreign key `experiment_id` points to `experiment`. The pair (`experiment_id`, `shot_index`) is unique, so a shot cannot be stored twice. |
+| `decoder`         | One of the four supplied decoders                                                      | Primary key `decoder_id`. `decoder_name` is unique.                                                                                                              |
+| `shot_prediction` | What one decoder predicted for one shot                                                | Primary key (`shot_id`, `decoder_id`), so each decoder has exactly one prediction per shot. Both columns are foreign keys.                                       |
 
 Two indexes support the common queries: `shot(experiment_id)`, for reading all the shots of an experiment, and `shot_prediction(decoder_id)`, for comparing decoders. Together with the keys, these make the decoder comparison in Q2 a plain join.
 
@@ -416,10 +431,10 @@ erDiagram
 
 Part II reads two Parquet tables that Part I produces. We build their content with SQL views over Gold only and never re-read Bronze or Silver. A small Python step (`build_ml_tables.py`) runs the views, adds the course split, checks the result and writes the Parquet files to `ml/`. Together they hold 325,598 rows (250,000 + 75,598).
 
-| Table | One row is | Rows |
-|---|---|---|
-| `ml_google_decoder_example` | One Google hardware shot, with its packed detector bits, the four decoder predictions and the true observable flip | 250,000 |
-| `ml_syndrome_decoder_example` | One distinct syndrome-and-label observation in one fault-rate experiment, with its weight (`sample_weight`, the source `quantity`) | 75,598 |
+| Table                         | One row is                                                                                                                         | Rows    |
+|-------------------------------|------------------------------------------------------------------------------------------------------------------------------------|---------|
+| `ml_google_decoder_example`   | One Google hardware shot, with its packed detector bits, the four decoder predictions and the true observable flip                 | 250,000 |
+| `ml_syndrome_decoder_example` | One distinct syndrome-and-label observation in one fault-rate experiment, with its weight (`sample_weight`, the source `quantity`) | 75,598  |
 
 **`example_id`.** Every ML row has an `example_id`, a repeatable hash (for example `ml_f1d5fd50f9b1`), so reruns give the same IDs. It leads back to the Gold record (`shot` or `syndrome_observation`), then to Silver and Bronze (see the worked traces).
 
@@ -436,13 +451,13 @@ QASMBench is different in kind from the other two sources. A QASMBench file is a
 
 We still tested it rather than assuming. The query `starter/sql/analysis/rejected_join_qasmbench.sql` tries several ways of joining the circuits to the experiments, and its output is saved in `starter/results/part1/analysis/rejected_join_qasmbench.csv`:
 
-| Candidate join | Matching rows |
-|---|---|
-| Circuit id = Google experiment id | 0 |
-| Circuit id = syndrome experiment id | 0 |
-| Measurement count, qubit count or checks per circuit = the Google values | 0 |
-| Benchmark name contains `d3`, joined to syndrome rows | 151,196 |
-| Benchmark name contains `d3`, joined to Google shots | 400,000 |
+| Candidate join                                                           | Matching rows |
+|--------------------------------------------------------------------------|---------------|
+| Circuit id = Google experiment id                                        | 0             |
+| Circuit id = syndrome experiment id                                      | 0             |
+| Measurement count, qubit count or checks per circuit = the Google values | 0             |
+| Benchmark name contains `d3`, joined to syndrome rows                    | 151,196       |
+| Benchmark name contains `d3`, joined to Google shots                     | 400,000       |
 
 Every join based on a real identifier or property finds nothing. The only one that returns rows matches on the text "d3" in a benchmark name. Here "d3" is read as code distance 3, and only one benchmark (`error_correctiond3_n5`, in its source and transpiled variants) has it. That one match pairs the same two circuit files with every distance-3 row, so the numbers are large but meaningless, and any totals computed over them would be wrong.
 
@@ -454,15 +469,15 @@ Every join based on a real identifier or property finds nothing. The only one th
 
 All three sources passed validation without a single rejected row. In total 325,619 rows were read and 325,619 were accepted.
 
-| Table | Source | Read | Accepted | Rejected |
-|---|---|---|---|---|
-| `experiment` | Google | 5 | 5 | 0 |
-| `shot` | Google | 250,000 | 250,000 | 0 |
-| `syndrome_observation` | Syndromes | 75,598 | 75,598 | 0 |
-| `circuit` | QASMBench | 6 | 6 | 0 |
-| `conditional_correction` | QASMBench | 6 | 6 | 0 |
-| `stabilizer_check` | QASMBench | 4 | 4 | 0 |
-| **Total** | | **325,619** | **325,619** | **0** |
+| Table                    | Source    | Read        | Accepted    | Rejected |
+|--------------------------|-----------|-------------|-------------|----------|
+| `experiment`             | Google    | 5           | 5           | 0        |
+| `shot`                   | Google    | 250,000     | 250,000     | 0        |
+| `syndrome_observation`   | Syndromes | 75,598      | 75,598      | 0        |
+| `circuit`                | QASMBench | 6           | 6           | 0        |
+| `conditional_correction` | QASMBench | 6           | 6           | 0        |
+| `stabilizer_check`       | QASMBench | 4           | 4           | 0        |
+| **Total**                |           | **325,619** | **325,619** | **0**    |
 
 The counts come from `results/part1/row_counts.json`. The `data_issues` table holds 80 warnings, and all of them come from QASMBench (see below). The rest of this section describes the findings for each source.
 
@@ -490,19 +505,19 @@ All 7 files and all 75,598 rows were accepted, and the syndrome data raised no i
 
 All QASMBench rows passed validation: nothing was rejected.
 
-| Table | Read | Accepted | Rejected |
-|---|---|---|---|
-| `circuit` | 6 | 6 | 0 |
-| `conditional_correction` | 6 | 6 | 0 |
-| `stabilizer_check` | 4 | 4 | 0 |
+| Table                    | Read | Accepted | Rejected |
+|--------------------------|------|----------|----------|
+| `circuit`                | 6    | 6        | 0        |
+| `conditional_correction` | 6    | 6        | 0        |
+| `stabilizer_check`       | 4    | 4        | 0        |
 
 Only two of the six circuit files produce rows in `conditional_correction` and `stabilizer_check`: the source and transpiled versions of `qec_sm_n5`. This is the only benchmark with classical feedback. The other four files (`error_correctiond3_n5` and `qec_en_n5`, each in two variants) contain no `if` statements and no parity checks, so they correctly produce a `circuit` row and nothing else. These empty results are not data loss.
 
-| File | `circuit` | `conditional_correction` | `stabilizer_check` |
-|---|---|---|---|
-| `error_correctiond3_n5` (source, transpiled) | 1 each | 0 | 0 |
-| `qec_en_n5` (source, transpiled) | 1 each | 0 | 0 |
-| `qec_sm_n5` (source, transpiled) | 1 each | 3 each | 2 each |
+| File                                         | `circuit` | `conditional_correction` | `stabilizer_check` |
+|----------------------------------------------|-----------|--------------------------|--------------------|
+| `error_correctiond3_n5` (source, transpiled) | 1 each    | 0                        | 0                  |
+| `qec_en_n5` (source, transpiled)             | 1 each    | 0                        | 0                  |
+| `qec_sm_n5` (source, transpiled)             | 1 each    | 3 each                   | 2 each             |
 
 We checked the counts against the raw files. A text scan of the whole archive finds `if(` on exactly 6 lines, which matches the 6 rows in `conditional_correction`. The 4 stabilizer checks are the 2 parity checks of `qec_sm_n5`, counted once per variant. Source and transpiled files also give the same qubit, measurement and two-qubit gate counts for every benchmark, which is a useful consistency check because transpiling changes how gates are written, not how many there are.
 
@@ -510,11 +525,11 @@ We checked the counts against the raw files. A text scan of the whole archive fi
 
 No QASMBench row was rejected, but `data_issues` contains 80 warnings. All of them come from one rule, `qasm_circuit_known_gate`, which warns when a gate name is not defined in the circuit or in the gate library `qelib1.inc`.
 
-| File | Warnings | Gate name flagged | Meaning |
-|---|---|---|---|
-| `error_correctiond3_n5_transpiled` | 62 | `sx` | Real finding |
-| `qec_en_n5_transpiled` | 12 | `sx` | Real finding |
-| `qec_sm_n5` and `qec_sm_n5_transpiled` | 3 each (6 in total) | `if` | Probably a false positive |
+| File                                   | Warnings            | Gate name flagged | Meaning                   |
+|----------------------------------------|---------------------|-------------------|---------------------------|
+| `error_correctiond3_n5_transpiled`     | 62                  | `sx`              | Real finding              |
+| `qec_en_n5_transpiled`                 | 12                  | `sx`              | Real finding              |
+| `qec_sm_n5` and `qec_sm_n5_transpiled` | 3 each (6 in total) | `if`              | Probably a false positive |
 
 - **`sx` (74 warnings):** this gate appears only in the transpiled files. The transpiler introduced it, and `qelib1.inc` does not declare it. We accepted these rows because an unknown gate name is more likely a gap in our gate list than a broken circuit. This is why the rule is a warning and not an error.
 - **`if` (6 warnings):** `if` is the keyword for a conditional statement, not a gate. The count is 3 per file, which equals the number of conditional statements in each file, so the rule is most likely treating each `if` statement as a gate. These rows are correct and also appear in `conditional_correction`.
@@ -538,12 +553,12 @@ A trace proves reproducibility: it shows that any ML example can be followed bac
 - **Silver:** the `shot` and `experiment` Parquet tables are filtered by the `source_record_id` values taken from the Gold shot and experiment rows.
 - **Bronze:** the same `source_record_id` values are used to find the rows in the shared source trace table. One shot maps to several files in the original archive, each with the record locator `shot_index=1`: the measurements, the detection events, the actual observable flips and the predictions of each decoder.
 
-| Step | Table or file | Key used |
-|---|---|---|
-| ML | `ml/ml_google_decoder_example.parquet` | `example_id` = `ml_f1d5fd50f9b1` |
-| Gold | `shot`, `experiment`, `shot_prediction` | `shot_id` = `google_shot_4959c10c62f4`, `experiment_id` |
-| Silver | `silver/google_qec/shot.parquet` and `experiment.parquet` | `source_record_id` |
-| Bronze | `source_trace.parquet` | `source_record_id`, archive member and `shot_index=1` |
+| Step   | Table or file                                             | Key used                                                |
+|--------|-----------------------------------------------------------|---------------------------------------------------------|
+| ML     | `ml/ml_google_decoder_example.parquet`                    | `example_id` = `ml_f1d5fd50f9b1`                        |
+| Gold   | `shot`, `experiment`, `shot_prediction`                   | `shot_id` = `google_shot_4959c10c62f4`, `experiment_id` |
+| Silver | `silver/google_qec/shot.parquet` and `experiment.parquet` | `source_record_id`                                      |
+| Bronze | `source_trace.parquet`                                    | `source_record_id`, archive member and `shot_index=1`   |
 
 ## Syndrome trace
 
@@ -564,14 +579,14 @@ The assignment asks three questions, which we answer with reproducible SQL again
 **Query:** `q1_syndrome_by_fault_rate.sql`. It joins `syndrome_observation`, `syndrome_experiment` and `syndrome_pattern` (three Gold tables), groups by experiment, and weights every row by its `quantity` so that each row counts as many times as it was observed.
 
 | Fault rate | CSV rows | Distinct syndromes | Weighted observations | Logical-error rate | Share of all-zero syndrome | Logical errors with all-zero syndrome |
-|---|---|---|---|---|---|---|
-| 1e-5 | 68 | 68 | 10,000,000 | 0.000234 | 0.99873 | 0 |
-| 5e-5 | 215 | 202 | 10,000,000 | 0.001154 | 0.99364 | 0 |
-| 1e-4 | 491 | 445 | 10,000,000 | 0.002291 | 0.98741 | 0 |
-| 5e-4 | 1,407 | 1,228 | 10,000,000 | 0.011440 | 0.93841 | 2 |
-| 1e-3 | 2,854 | 2,387 | 10,000,000 | 0.022702 | 0.88061 | 2 |
-| 5e-3 | 20,887 | 14,643 | 10,000,000 | 0.103950 | 0.53097 | 210 |
-| 1e-2 | 49,676 | 31,466 | 10,000,000 | 0.186527 | 0.28396 | 1,010 |
+|------------|----------|--------------------|-----------------------|--------------------|----------------------------|---------------------------------------|
+| 1e-5       | 68       | 68                 | 10,000,000            | 0.000234           | 0.99873                    | 0                                     |
+| 5e-5       | 215      | 202                | 10,000,000            | 0.001154           | 0.99364                    | 0                                     |
+| 1e-4       | 491      | 445                | 10,000,000            | 0.002291           | 0.98741                    | 0                                     |
+| 5e-4       | 1,407    | 1,228              | 10,000,000            | 0.011440           | 0.93841                    | 2                                     |
+| 1e-3       | 2,854    | 2,387              | 10,000,000            | 0.022702           | 0.88061                    | 2                                     |
+| 5e-3       | 20,887   | 14,643             | 10,000,000            | 0.103950           | 0.53097                    | 210                                   |
+| 1e-2       | 49,676   | 31,466             | 10,000,000            | 0.186527           | 0.28396                    | 1,010                                 |
 
 **What it shows:**
 
@@ -587,12 +602,12 @@ The assignment asks three questions, which we answer with reproducible SQL again
 **Query:** `q2_decoder_error_rates.sql`. It joins `shot`, `experiment` and `shot_prediction` (three Gold tables) and groups by distance, patch centre and decoder. A decoder is counted as wrong on a shot when its predicted flip differs from the actual observable flip. The error rate is the share of shots where it is wrong.
 
 | Distance | Patch centre | Belief matching | Correlated matching | PyMatching | Tensor-network contraction |
-|---|---|---|---|---|---|
-| 3 | (3, 5) | 0.4025 | 0.4194 | 0.4342 | 0.4023 |
-| 3 | (5, 3) | 0.4159 | 0.4252 | 0.4432 | 0.4130 |
-| 3 | (5, 7) | 0.3920 | 0.4182 | 0.4306 | 0.3839 |
-| 3 | (7, 5) | 0.3884 | 0.4130 | 0.4299 | 0.3887 |
-| 5 | (5, 5) | 0.4015 | 0.4257 | 0.4510 | 0.3955 |
+|----------|--------------|-----------------|---------------------|------------|----------------------------|
+| 3        | (3, 5)       | 0.4025          | 0.4194              | 0.4342     | 0.4023                     |
+| 3        | (5, 3)       | 0.4159          | 0.4252              | 0.4432     | 0.4130                     |
+| 3        | (5, 7)       | 0.3920          | 0.4182              | 0.4306     | 0.3839                     |
+| 3        | (7, 5)       | 0.3884          | 0.4130              | 0.4299     | 0.3887                     |
+| 5        | (5, 5)       | 0.4015          | 0.4257              | 0.4510     | 0.3955                     |
 
 Every row covers 50,000 shots per decoder.
 
@@ -610,23 +625,23 @@ Every row covers 50,000 shots per decoder.
 
 **Q3a: parity checks**
 
-| Variant | Check | Ancilla | Data qubits | Syndrome bit |
-|---|---|---|---|---|
-| source | `a[0]` | `a[0]` | `q[0]`, `q[1]` | `syn[0]` |
-| source | `a[1]` | `a[1]` | `q[1]`, `q[2]` | `syn[1]` |
-| transpiled | `a[0]` | `a[0]` | `q[0]`, `q[1]` | `syn[0]` |
-| transpiled | `a[1]` | `a[1]` | `q[1]`, `q[2]` | `syn[1]` |
+| Variant    | Check  | Ancilla | Data qubits    | Syndrome bit |
+|------------|--------|---------|----------------|--------------|
+| source     | `a[0]` | `a[0]`  | `q[0]`, `q[1]` | `syn[0]`     |
+| source     | `a[1]` | `a[1]`  | `q[1]`, `q[2]` | `syn[1]`     |
+| transpiled | `a[0]` | `a[0]`  | `q[0]`, `q[1]` | `syn[0]`     |
+| transpiled | `a[1]` | `a[1]`  | `q[1]`, `q[2]` | `syn[1]`     |
 
 **Q3b: conditional corrections**
 
-| Variant | Condition | Checks that fired | Gate | Target qubit |
-|---|---|---|---|---|
-| source | `syn == 1` | `a[0]` | `x` | `q[0]` |
-| source | `syn == 2` | `a[1]` | `x` | `q[2]` |
-| source | `syn == 3` | `a[0]`, `a[1]` | `x` | `q[1]` |
-| transpiled | `syn == 1` | `a[0]` | `x` | `q[0]` |
-| transpiled | `syn == 2` | `a[1]` | `x` | `q[2]` |
-| transpiled | `syn == 3` | `a[0]`, `a[1]` | `x` | `q[1]` |
+| Variant    | Condition  | Checks that fired | Gate | Target qubit |
+|------------|------------|-------------------|------|--------------|
+| source     | `syn == 1` | `a[0]`            | `x`  | `q[0]`       |
+| source     | `syn == 2` | `a[1]`            | `x`  | `q[2]`       |
+| source     | `syn == 3` | `a[0]`, `a[1]`    | `x`  | `q[1]`       |
+| transpiled | `syn == 1` | `a[0]`            | `x`  | `q[0]`       |
+| transpiled | `syn == 2` | `a[1]`            | `x`  | `q[2]`       |
+| transpiled | `syn == 3` | `a[0]`, `a[1]`    | `x`  | `q[1]`       |
 
 The "checks that fired" column is derived in SQL. The classical register `syn` is read as a binary number in which syndrome bit 0 is worth 1 and bit 1 is worth 2. A check fired when its bit is set in the condition value, which the query tests with `(condition_value >> syndrome_index) % 2 = 1`.
 
@@ -646,46 +661,60 @@ The "checks that fired" column is derived in SQL. The classical register `syn` i
 - **Google data is small.** There are only 5 experiments, and just one is at distance 5. So comparing distances only gives a rough idea.
 - **Some warnings are false alarms.** The gate check logs 80 warnings. 74 are for the gate `sx`, which is real but not listed in `qelib1.inc`. The other 6 come from `if` statements that the check mistakes for gates. The data is not affected, but the warning count is higher than the real number of problems.
 
+# Rerun Evidence
+
+
+
+We ran `make run` twice on unchanged inputs. After each run we executed
+`sql/rerun_check/check.sql` against Gold. For every Gold table it reports the row
+count, the number of distinct keys and a hash of all keys.
+
+| Evidence    | File                           |
+|-------------|--------------------------------|
+| After run 1 | `results/part1/rerun/run1.txt` |
+| After run 2 | `results/part1/rerun/run2.txt` |
+
+**Result:** `diff run1.txt run2.txt` is empty. In every table the row count equals the number of distinct keys (no duplicates), and the key hash is also the same after  both runs This works because Gold is emptied and  reloaded in one transaction, and every ID is a hash of its source position, never of run time or load order.
+
 # Commands to run
 
 Run these in order.
 
-| Where | Command | What it does |
-|---|---|---|
-| Repo root | `make bootstrap` | Starts PostgreSQL, MinIO, Adminer and JupyterLab, copies the course data into Bronze, and checks that everything is ready. |
-| `starter/` | `make run` | Runs the whole pipeline: checks and stores the source files (Bronze), builds the Silver tables, loads Gold into PostgreSQL, builds the ML tables and runs the SQL analyses. It takes about 34 seconds. Results go to `results/part1/`. |
-| `starter/` | `make train` | Trains and evaluates the Part II models from the ML tables. Results go to `results/part2/`. |
-| `starter/` | `make test` | Runs the automated tests. |
-
-Two extra commands are useful when something looks wrong: `make check` (are PostgreSQL and MinIO reachable?) and `make inventory` (are the course data files there?).
+| Where      | Command                                                                                     | What it does                                                                                                                                                                                                                           |
+|------------|---------------------------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Repo root  | `make bootstrap`                                                                            | Starts PostgreSQL, MinIO, Adminer and JupyterLab, copies the course data into Bronze, and checks that everything is ready.                                                                                                             |
+| `starter/` | `make run`                                                                                  | Runs the whole pipeline: checks and stores the source files (Bronze), builds the Silver tables, loads Gold into PostgreSQL, builds the ML tables and runs the SQL analyses. It takes about 34 seconds. Results go to `results/part1/`. |
+| `starter/` | `make train`                                                                                | Trains and evaluates the Part II models from the ML tables. Results go to `results/part2/`.                                                                                                                                            |
+| `starter/` | `make test`                                                                                 | Runs the automated tests.                                                                                                                                                                                                              |
+| Repo root  | `make run` twice, running `sql/rerun_check/check.sql` after each (see the previous section) | Check that a second run gives the same rows and IDs. The two outputs, `results/part1/rerun/run1.txt` and `run2.txt`, should be the same.                                                                                               |
 
 # Troubleshooting
 
 ## What can go wrong when running the pipeline
 
-| Problem | Why it happens | What to do |
-|---|---|---|
-| `make run` or `make train` cannot connect | PostgreSQL or MinIO is not running, because `make bootstrap` was not run or the services were stopped | Run `make bootstrap` at the repo root, then `make check` in `starter/` to confirm both are reachable |
-| `python: command not found` | The `starter/` Makefile calls `python`, and some systems only have `python3` | Run `make run PYTHON=python3` (the same works for `train` and `test`) |
-| `make train` fails because ML tables are missing | Part II reads the tables that `make run` creates, so it was run first | Run `make run`, then `make train` |
-| The run stops at the start with a hash or size error | A source zip does not match the course `bundle-manifest.json`, so it was changed or is incomplete | Re-copy the original course data (`make seed` at the repo root, or `make inventory` to see what is there). The check is on purpose, because we must not process unverified data. |
-| The run stops with an error about a missing file or an unsafe name | A required companion file is missing, or a zip member has an unsafe path | This is on purpose. The assignment says these cases must stop the run. Fix the input data and rerun. |
-| Row counts do not match the report | The data or the code revision changed | Compare `results/part1/row_counts.json` and `run.json`, which record the counts, the input hashes and the code revision of each run |
-| `data_issues.parquet` contains 80 warnings | These are expected: 74 for the gate `sx` and 6 for `if` statements (see Cleaning and validation rules) | No action needed. No rows are rejected. |
-| Old data in PostgreSQL | An earlier run left rows behind | Rerunning is safe. Gold is emptied and reloaded on every run. For a completely fresh start, `make reset-platform` removes the containers and their data, then run `make bootstrap` again. |
+| Problem                                                            | Why it happens                                                                                         | What to do                                                                                                                                                                                |
+|--------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `make run` or `make train` cannot connect                          | PostgreSQL or MinIO is not running, because `make bootstrap` was not run or the services were stopped  | Run `make bootstrap` at the repo root, then `make check` in `starter/` to confirm both are reachable                                                                                      |
+| `python: command not found`                                        | The `starter/` Makefile calls `python`, and some systems only have `python3`                           | Run `make run PYTHON=python3` (the same works for `train` and `test`)                                                                                                                     |
+| `make train` fails because ML tables are missing                   | Part II reads the tables that `make run` creates, so it was run first                                  | Run `make run`, then `make train`                                                                                                                                                         |
+| The run stops at the start with a hash or size error               | A source zip does not match the course `bundle-manifest.json`, so it was changed or is incomplete      | Re-copy the original course data (`make seed` at the repo root, or `make inventory` to see what is there). The check is on purpose, because we must not process unverified data.          |
+| The run stops with an error about a missing file or an unsafe name | A required companion file is missing, or a zip member has an unsafe path                               | This is on purpose. The assignment says these cases must stop the run. Fix the input data and rerun.                                                                                      |
+| Row counts do not match the report                                 | The data or the code revision changed                                                                  | Compare `results/part1/row_counts.json` and `run.json`, which record the counts, the input hashes and the code revision of each run                                                       |
+| `data_issues.parquet` contains 80 warnings                         | These are expected: 74 for the gate `sx` and 6 for `if` statements (see Cleaning and validation rules) | No action needed. No rows are rejected.                                                                                                                                                   |
+| Old data in PostgreSQL                                             | An earlier run left rows behind                                                                        | Rerunning is safe. Gold is emptied and reloaded on every run. For a completely fresh start, `make reset-platform` removes the containers and their data, then run `make bootstrap` again. |
 
 ## How the tests cover the tables
 
 The tests in `starter/tests/` build small made-up inputs and run offline, so they need no database or MinIO.
 
-| Test file | What it covers |
-|---|---|
-| `test_google_experiment.py` | The Google `experiment` table: valid folders, column types, the ID format, a trace row back to Bronze, and rejection of missing or incomplete `properties.yml` |
-| `test_google_shot.py` | The Google `shot` table: valid shots are published, non-zero padding rejects only that shot, a length mismatch rejects the experiment's shots, and a missing companion file stops the run |
-| `test_formats.py` | The `.b8` and `.01` readers: byte alignment, little-endian bit order, partial records and non-binary values |
-| `test_qasmbench.py` | The QASMBench tables: gate expansion, register reading, line locators, stable IDs, and rejected versus warned rules |
-| `test_ml.py` | The Part II helpers: unpacking bits, train/test splits and weighted error rates |
-| `test_models.py`, `test_config.py` | Record hashing, stage results and settings |
+| Test file                          | What it covers                                                                                                                                                                            |
+|------------------------------------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `test_google_experiment.py`        | The Google `experiment` table: valid folders, column types, the ID format, a trace row back to Bronze, and rejection of missing or incomplete `properties.yml`                            |
+| `test_google_shot.py`              | The Google `shot` table: valid shots are published, non-zero padding rejects only that shot, a length mismatch rejects the experiment's shots, and a missing companion file stops the run |
+| `test_formats.py`                  | The `.b8` and `.01` readers: byte alignment, little-endian bit order, partial records and non-binary values                                                                               |
+| `test_qasmbench.py`                | The QASMBench tables: gate expansion, register reading, line locators, stable IDs, and rejected versus warned rules                                                                       |
+| `test_ml.py`                       | The Part II helpers: unpacking bits, train/test splits and weighted error rates                                                                                                           |
+| `test_models.py`, `test_config.py` | Record hashing, stage results and settings                                                                                                                                                |
 
 # AI usage
 

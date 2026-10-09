@@ -1,0 +1,12 @@
+       table_name       | row_count | distinct_ids |             id_hash              
+------------------------+-----------+--------------+----------------------------------
+ conditional_correction |         6 |            6 | 330f31da0e1f19ce9f10ec2187721a31
+ stabilizer_check       |         4 |            4 | b9cced6fd25b8ad2402177aae3008318
+ circuit                |         6 |            6 | eacc7a79628452e0c0b5fc75d28f55e4
+ experiment             |         5 |            5 | 84f938146eff01db62303cfa1654df32
+ syndrome_pattern       |     31941 |        31941 | 8e345b70dc788e6df82d6c6d30fcd5c8
+ syndrome_observation   |     75598 |        75598 | f5c764114cc8afc8e3bdae09987e9ad6
+ shot                   |    250000 |       250000 | 85e2dbca319a14cb3bab12a7acadec2f
+ shot_prediction        |   1000000 |      1000000 | f1c7fa52187efa67ce0227f44667d5bd
+(8 rows)
+
