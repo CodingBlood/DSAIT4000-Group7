@@ -1,5 +1,5 @@
 {
-  "model_run_id": "b6068bf8-a1f5-4ea3-aed4-1393f1a0db59",
+  "model_run_id": "279e76ec-e8ac-43cf-a4b8-83065d8e295d",
   "data_release_version": {
     "release_name": "quantum-data-core",
     "release_date": "2026-08-05",
@@ -9,7 +9,7 @@
     "ml_syndrome_decoder_example": "edbe27083c0a25f38efef5b72310e0250baa0cea51baa9f8f6d4c10a7e3b8f4d",
     "ml_google_decoder_example": "de843cd359f5251404fedf255d6efc97b550c92faa93319d6ffd1f62aec00fee"
   },
-  "code_revision": "a57c81fdb08aae8a1e8f2e4fb27bb0e924138d0b",
+  "code_revision": "1297146d3394e5110b6fe6ad92314daf0ba6de58",
   "dependency_versions": {
     "scikit-learn": "1.9.0",
     "pandas": "2.3.1",
@@ -254,30 +254,30 @@
   "timings": {
     "task_a": {
       "task_a_weighted_prior_baseline": {
-        "training_time_seconds": 0.005941867828369141,
-        "prediction_time_seconds": 0.00154876708984375
+        "training_time_seconds": 0.0026886463165283203,
+        "prediction_time_seconds": 0.0007915496826171875
       },
       "task_a_weighted_logistic_regression": {
-        "training_time_seconds": 0.6164705753326416,
-        "prediction_time_seconds": 0.0019490718841552734
+        "training_time_seconds": 0.1257638931274414,
+        "prediction_time_seconds": 0.0015969276428222656
       }
     },
     "task_b": {
       "task_b_d3_combined_logistic_regression": {
-        "training_time_seconds": 0.05401492118835449,
-        "prediction_time_seconds": 0.02807903289794922
+        "training_time_seconds": 0.05097246170043945,
+        "prediction_time_seconds": 0.026422500610351562
       },
       "task_b_d5_combined_logistic_regression": {
-        "training_time_seconds": 0.014603376388549805,
-        "prediction_time_seconds": 0.005887508392333984
+        "training_time_seconds": 0.013950109481811523,
+        "prediction_time_seconds": 0.005836963653564453
       }
     },
     "task_c": {
       "task_c_mlp": {
-        "training_time_seconds": 5.457361221313477,
-        "prediction_time_seconds": 0.08063912391662598
+        "training_time_seconds": 12.034308910369873,
+        "prediction_time_seconds": 0.027889728546142578
       }
     },
-    "total_run_seconds": 21.92666244506836
+    "total_run_seconds": 24.46682596206665
   }
 }

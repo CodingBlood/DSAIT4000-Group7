@@ -167,6 +167,8 @@ Training took 5.46 s and prediction on the test split took 0.081 s.
 
 A fully connected network has to find all of this by itself from 20,000 shots, which is little for 200 inputs. The matching decoders use exactly this structure, which may be why they do better.
 
+**Note:** The MLP stops at the 200-iteration limit before scikit-learn considers it converged (ConvergenceWarning). Raising the limit to 500 did not remove the warning: the training loss keeps falling slowly while the model fits the training shots more closely. Because test performance does not need more iterations to be meaningful here, we kept 200.
+
 # Information left out of each model
 
 - **Task A:** `experiment_id`, `physical_fault_rate` (it defines the split, so it cannot be a feature) and the constant `round_count` and `check_count`. The 16 bits are used as separate inputs, so only their order carries the round structure.
