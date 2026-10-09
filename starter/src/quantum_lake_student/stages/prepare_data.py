@@ -604,7 +604,9 @@ class QasmBenchUtility:
             if stmt.startswith("cx"):
                 qubits = stmt.replace("cx", "").strip().split(",")
                 source, target = qubits[0].strip(), qubits[1].strip()
-                data_qubits, build_indices = pending_targets.setdefault(target, ([], []))
+                if target not in pending_targets:
+                    pending_targets[target] = ([], [])
+                data_qubits, build_indices = pending_targets[target]
                 data_qubits.append(source)
                 build_indices.append(idx)
 
@@ -631,7 +633,9 @@ class QasmBenchUtility:
     def extract_stabilizer_checks(qasm_text):
         statements = QasmBenchUtility.qasm_statements(qasm_text)
         qregs, cregs = QasmBenchUtility.qasm_registers(statements)
-        registers = {**qregs, **cregs}
+        registers = {}
+        registers.update(qregs)
+        registers.update(cregs)
         flat_statements = QasmBenchUtility.qasm_expanded_statements(
             statements, qregs, cregs, QasmBenchUtility.qasm_gate_definitions(qasm_text)
         )
@@ -650,7 +654,7 @@ class QasmBenchUtility:
         if check["ancilla_qubit"] in check["data_qubits"]:
             problems.append(("stabilizer_ancilla_not_data_qubit", check["ancilla_qubit"]))
 
-        for qubit_ref in [check["ancilla_qubit"], *check["data_qubits"]]:
+        for qubit_ref in [check["ancilla_qubit"]] + check["data_qubits"]:
             try:
                 reg, idx = reg_and_index(qubit_ref)
             except ValueError:
@@ -672,7 +676,7 @@ class QasmBenchUtility:
 
     @staticmethod
     def build_stabilizer_check_rows(raw_bytes: bytes, benchmark: str, variant: str, member: str, archive_sha256: str):
-        circuit_id = f"qasmbench:{benchmark}:{variant}"  # matches table 6's convention
+        circuit_id = f"qasmbench:{benchmark}:{variant}" 
 
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
             qasm_text = z.open(member).read().decode()

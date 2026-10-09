@@ -88,7 +88,6 @@ CREATE TABLE IF NOT EXISTS syndrome_observation (
 CREATE INDEX IF NOT EXISTS idx_syn_obs_experiment ON syndrome_observation(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_syn_obs_pattern ON syndrome_observation(pattern_id);
 
---Sahil's Code.
 CREATE TABLE IF NOT EXISTS circuit (
     circuit_id            TEXT PRIMARY KEY,
     source_record_id      TEXT NOT NULL UNIQUE,
