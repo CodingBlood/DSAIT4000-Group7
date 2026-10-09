@@ -53,8 +53,8 @@
         "example_id": "ml_f1d5fd50f9b1",
         "model_id": "task_c_mlp",
         "label": true,
-        "prediction": true,
-        "probability": 0.89487142067726,
+        "prediction": false,
+        "probability": 0.3821379500949877,
         "split": "test"
       }
     ],

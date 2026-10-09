@@ -113,7 +113,6 @@ def mistake_overlap(y_test, decoder_predictions: dict) -> dict:
 
 
 def run_task_b(df_ml: pd.DataFrame, distance: int) -> dict:
-    """Task B for one distance: baseline, 4 supplied decoders, combined model."""
     train_df = df_ml[df_ml["data_split"] == "train"].reset_index(drop=True)
     val_df = df_ml[df_ml["data_split"] == "validation"].reset_index(drop=True)
     test_df = df_ml[df_ml["data_split"] == "test"].reset_index(drop=True)
@@ -129,7 +128,7 @@ def run_task_b(df_ml: pd.DataFrame, distance: int) -> dict:
     predictions = []
     metrics = {}
 
-    # 1. majority / prior baseline (fitted on train only)
+
     prior = float(y_train.mean())
     majority = int(prior >= 0.5)
     base_pred = np.full(len(y_test), majority)
@@ -138,7 +137,7 @@ def run_task_b(df_ml: pd.DataFrame, distance: int) -> dict:
     add_prediction_rows(predictions, test_df, prefix + "majority_baseline",
                         y_test, base_pred, base_prob, "test")
 
-    # 2. the four supplied decoders on the same test shots
+
     decoder_predictions = {}
     for column in GOOGLE_META_PREDICTION_COLUMNS:
         pred = test_df[column].astype(int).to_numpy()
@@ -147,7 +146,7 @@ def run_task_b(df_ml: pd.DataFrame, distance: int) -> dict:
         metrics[model_id] = score_predictions(y_test, pred, None)
         add_prediction_rows(predictions, test_df, model_id, y_test, pred, None, "test")
 
-    # 3. combined linear decoder; threshold picked on validation only
+
     model = LogisticRegression(max_iter=1000, random_state=SEED)
     fit_start = time.time()
     model.fit(X_train, y_train)
@@ -188,7 +187,7 @@ def run_task_b(df_ml: pd.DataFrame, distance: int) -> dict:
 
 
 def run_task_c(df_google: pd.DataFrame) -> dict:
-    """Task C: small MLP on the 200 raw detector bits (distance 3, shot_index < 12500)."""
+
     df = df_google[(df_google["distance"] == 3) & (df_google["shot_index"] < 12500)]
     df = df.reset_index(drop=True)
 
@@ -223,7 +222,7 @@ def run_task_c(df_google: pd.DataFrame) -> dict:
 
 
 class WeightedPriorBaseline:
-    """Weighted majority/prior baseline: predicts the weighted positive rate."""
+
  
     def fit(self, X, y, sample_weight):
         y = np.asarray(y)
@@ -279,7 +278,7 @@ def run_task_a(df_syn: pd.DataFrame) -> dict:
 
 
 def run(model_run_id: str) -> StageResult:
-    # raise NotImplementedError("Implement the documented QEC decoder training stage")
+    
     result = StageResult(stage="train", run_id=model_run_id)
     run_start = time.time()
 

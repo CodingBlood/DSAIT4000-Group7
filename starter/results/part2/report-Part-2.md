@@ -158,6 +158,9 @@ Training took 5.46 s and prediction on the test split took 0.081 s.
 - It used all 200 iterations, so it stopped at the limit and not because it had converged.
 - We report this as a negative result. It shows that the packed bits can be delivered to a model in the right form. It does not show that the raw bits contain no information.
 
+
+**Note:** The MLP stops at the 200-iteration limit before scikit-learn considers it converged (ConvergenceWarning). Raising the limit to 500 did not remove the warning: the training loss keeps falling slowly while the model fits the training shots more closely. Because test performance does not need more iterations to be meaningful here, we kept 200.
+
 ## What a flat vector of 200 bits does not show
 
 - **Position.** The network does not know where a detector is on the chip. Two neighbouring detectors look as unrelated as two detectors far apart.

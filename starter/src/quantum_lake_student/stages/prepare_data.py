@@ -429,10 +429,15 @@ class QasmBenchUtility:
     def __init__(self):
         super()
 
+
+    @staticmethod
+    def keep_line_breaks(match) -> str:
+        return "\n" * match.group(0).count("\n")
+
     @staticmethod
     def qasm_statements(text: str) -> list[tuple[str, str]]:
         body = QasmBenchUtility.QASM_COMMENT.sub("", text)
-        body = QasmBenchUtility.QASM_GATE_BLOCK.sub(lambda m: "\n" * m.group(0).count("\n"), body)
+        body = QasmBenchUtility.QASM_GATE_BLOCK.sub(QasmBenchUtility.keep_line_breaks, body)
 
         found: list[tuple[str, str]] = []
         ordinals: dict[int, int] = {}
@@ -1244,7 +1249,7 @@ def run(run_id: str) -> StageResult:
 
     result.input_count = exp_dirs + shot_count + stabilizer_candidates + circuit_candidates + correction_candidates + syn_rows_read
     result.output_count = len(df_exp) + len(df_shot) + len(df_stabilizer) + len(df_circuit) + len(df_correction) + len(df_syn)
-    result.issue_count = result.input_count - result.output_count
+
  
 
 
@@ -1253,7 +1258,7 @@ def run(run_id: str) -> StageResult:
     df_trace = pd.concat([df_trace_experiment, df_trace_shots, df_syn_trace, df_trace_stabilizer, df_trace_circuit, df_trace_correction_table], axis=0, ignore_index=True)
     df_issues = pd.concat([df_issues_experiment, df_issues_shots, df_syn_issues, df_issues_stabilizer,df_issues_circuit, df_issues_correction_table], ignore_index=True)
     df_issues["run_id"] = run_id
-
+    result.issue_count = len(df_issues)
 
     write_parquet(df_exp.reset_index(drop=True), "silver/google_qec/experiment.parquet")
     write_parquet(df_shot.reset_index(drop=True), "silver/google_qec/shot.parquet")
