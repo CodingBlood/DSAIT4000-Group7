@@ -83,6 +83,11 @@ services:
     volumes:
       - ./starter:/workspace
       - ./datasets/student-bundle/core:/course-data:ro
+      # /workspace is only the starter folder, so git cannot find the repo from
+      # inside the container. Mounting the git directory read-only lets
+      # pipeline_utils.git_revision() record a real revision in run.json
+      # instead of falling back to the stamped file.
+      - ./.git:/repo/.git:ro
       - ./.git:/workspace/.git:ro
     depends_on:
       postgres:

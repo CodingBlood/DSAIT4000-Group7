@@ -425,6 +425,11 @@ class QasmBenchUtility:
     }
     QASM_NOT_AN_OPERATION = {"OPENQASM", "include", "qreg", "creg", "gate", "opaque", "barrier"}
     QASM_BUILTIN_GATES = {"U", "CX"}
+    # Gates a transpiler emits that this release's qelib1.inc does not
+    # declare. sx is the square root of X, a standard basis gate on IBM
+    # backends; the qelib1.inc shipped here predates it. Without this the
+    # transpiled circuits raise 74 "unknown gate" warnings for a real gate.
+    QASM_HARDWARE_BASIS_GATES = {"sx", "sxdg"}
 
     def __init__(self):
         super()
@@ -463,10 +468,13 @@ class QasmBenchUtility:
         qregs: dict[str, int] = {}
         cregs: dict[str, int] = {}
         for _locator, statement in statements:
-            if (match := QasmBenchUtility.QASM_QREG.match(statement)) is not None:
-                qregs[match.group(1)] = int(match.group(2))
-            elif (match := QasmBenchUtility.QASM_CREG.match(statement)) is not None:
-                cregs[match.group(1)] = int(match.group(2))
+            qreg_match = QasmBenchUtility.QASM_QREG.match(statement)
+            if qreg_match is not None:
+                qregs[qreg_match.group(1)] = int(qreg_match.group(2))
+                continue
+            creg_match = QasmBenchUtility.QASM_CREG.match(statement)
+            if creg_match is not None:
+                cregs[creg_match.group(1)] = int(creg_match.group(2))
         return qregs, cregs
 
     @staticmethod
@@ -474,15 +482,27 @@ class QasmBenchUtility:
         body = QasmBenchUtility.QASM_COMMENT.sub("", text)
         definitions: dict[str, tuple[list[str], list[str]]] = {}
         for match in QasmBenchUtility.QASM_GATE_DEFINITION.finditer(body):
-            parameters = [p.strip() for p in match.group(2).split(",") if p.strip()]
-            calls = [" ".join(s.split()) for s in match.group(3).split(";") if s.strip()]
+            parameters = []
+            for parameter in match.group(2).split(","):
+                parameter = parameter.strip()
+                if parameter:
+                    parameters.append(parameter)
+
+            calls = []
+            for call in match.group(3).split(";"):
+                if call.strip():
+                    calls.append(" ".join(call.split()))
+
             definitions[match.group(1)] = (parameters, calls)
         return definitions
 
     @staticmethod
     def qasm_circuit_identity(member: str) -> tuple[str, str, str]:
         benchmark = member.split("/")[1]
-        variant = "transpiled" if member.endswith("_transpiled.qasm") else "source"
+        if member.endswith("_transpiled.qasm"):
+            variant = "transpiled"
+        else:
+            variant = "source"
         return f"qasmbench:{benchmark}:{variant}", benchmark, variant
 
     @staticmethod
@@ -490,85 +510,153 @@ class QasmBenchUtility:
         match = QasmBenchUtility.QASM_OPERATION.match(operation_text)
         if match is None:
             return []
-        return [operand.strip() for operand in match.group(3).split(",") if operand.strip()]
+        operands = []
+        for operand in match.group(3).split(","):
+            operand = operand.strip()
+            if operand:
+                operands.append(operand)
+        return operands
 
     @staticmethod
     def qasm_expanded_operations(statements: list[tuple[str, str]], qregs: dict[str, int],gate_definitions: dict[str, tuple[list[str], list[str]]],) -> list[tuple[str, str, list[str]]]:
-        operations: list[tuple[str, str, list[str]]] = []
+        operations = []
 
-        def emit(locator: str, statement: str) -> None:
+        # Work list instead of a recursive helper. A statement can unwrap into
+        # more statements twice over: a conditional unwraps to the operation it
+        # guards, and a macro call unwraps to its body. Anything we unwrap goes
+        # back on the front of the list so the original order is kept.
+        pending = list(statements)
+
+        while pending:
+            locator, statement = pending.pop(0)
+
+            # `if (creg == int) <operation>;` is a wrapper, not a gate called
+            # "if". Put the operation it guards back on the list.
+            conditional = QasmBenchUtility.QASM_CONDITIONAL.match(statement)
+            if conditional is not None:
+                pending.insert(0, (locator, conditional.group(3).strip()))
+                continue
+
             measure = QasmBenchUtility.QASM_MEASURE_FULL.match(statement)
             if measure is not None:
-                qubit, bit = measure.group(1), measure.group(2)
-                if "[" not in qubit and qubit in qregs:  # whole register
+                qubit = measure.group(1)
+                # `measure a -> syn` with qreg a[2] is two measurements
+                if "[" not in qubit and qubit in qregs:
                     for index in range(qregs[qubit]):
                         operations.append((locator, "measure", [f"{qubit}[{index}]"]))
                 else:
                     operations.append((locator, "measure", [qubit]))
-                return
+                continue
 
             match = QasmBenchUtility.QASM_OPERATION.match(statement)
             if match is None:
-                return
+                continue
+
             name = match.group(1)
             if name in QasmBenchUtility.QASM_NOT_AN_OPERATION:
-                return
+                continue
 
             operands = QasmBenchUtility.qasm_operands(statement)
 
+            # A gate defined in this circuit is a macro, so swap the caller's
+            # qubits into its body and queue those statements up instead.
             if name in gate_definitions:
                 parameters, body = gate_definitions[name]
-                substitution = dict(zip(parameters, operands))
+                substitution = {}
+                for index in range(len(parameters)):
+                    if index < len(operands):
+                        substitution[parameters[index]] = operands[index]
+
+                replacements = []
                 for body_statement in body:
                     rewritten = body_statement
-                    for parameter, actual in substitution.items():
-                        rewritten = re.sub(rf"\b{re.escape(parameter)}\b", actual, rewritten)
-                    emit(locator, rewritten)
-                return
+                    for parameter in substitution:
+                        pattern = r"\b" + re.escape(parameter) + r"\b"
+                        rewritten = re.sub(pattern, substitution[parameter], rewritten)
+                    replacements.append((locator, rewritten))
+
+                pending[0:0] = replacements
+                continue
 
             operations.append((locator, name, operands))
 
-        for locator, statement in statements:
-            emit(locator, statement)
         return operations
 
     @staticmethod
     def qasm_expanded_statements(statements: list[tuple[str, str]], qregs: dict[str, int], cregs: dict[str, int], gate_definitions: dict[str, tuple[list[str], list[str]]],) -> list[tuple[str, str]]:
-        expanded: list[tuple[str, str]] = []
-        def emit(locator: str, statement: str) -> None:
+        expanded = []
+
+        # Same work-list approach as qasm_expanded_operations above, but this
+        # one hands back statement text because table 5 pattern-matches on it.
+        pending = list(statements)
+
+        while pending:
+            locator, statement = pending.pop(0)
+
             measure = QasmBenchUtility.QASM_MEASURE_FULL.match(statement)
             if measure is not None:
-                qubit, bit = measure.group(1), measure.group(2)
-                if "[" not in qubit and "[" not in bit and qubit in qregs and bit in cregs:
-                    for index in range(min(qregs[qubit], cregs[bit])):
-                        expanded.append((locator, f"measure {qubit}[{index}] -> {bit}[{index}]"))
+                qubit = measure.group(1)
+                bit = measure.group(2)
+                whole_register = (
+                    "[" not in qubit
+                    and "[" not in bit
+                    and qubit in qregs
+                    and bit in cregs
+                )
+                if whole_register:
+                    width = min(qregs[qubit], cregs[bit])
+                    for index in range(width):
+                        expanded.append(
+                            (locator, f"measure {qubit}[{index}] -> {bit}[{index}]")
+                        )
                 else:
                     expanded.append((locator, statement))
-                return
+                continue
 
             match = QasmBenchUtility.QASM_OPERATION.match(statement)
-            if match is not None and match.group(1) in gate_definitions:
-                parameters, body = gate_definitions[match.group(1)]
-                substitution = dict(zip(parameters, QasmBenchUtility.qasm_operands(statement)))
+            if match is None:
+                expanded.append((locator, statement))
+                continue
+
+            name = match.group(1)
+
+            if name in gate_definitions:
+                parameters, body = gate_definitions[name]
+                operands = QasmBenchUtility.qasm_operands(statement)
+                substitution = {}
+                for index in range(len(parameters)):
+                    if index < len(operands):
+                        substitution[parameters[index]] = operands[index]
+
+                replacements = []
                 for body_statement in body:
                     rewritten = body_statement
-                    for parameter, actual in substitution.items():
-                        rewritten = re.sub(rf"\b{re.escape(parameter)}\b", actual, rewritten)
-                    emit(locator, rewritten)
-                return
+                    for parameter in substitution:
+                        pattern = r"\b" + re.escape(parameter) + r"\b"
+                        rewritten = re.sub(pattern, substitution[parameter], rewritten)
+                    replacements.append((locator, rewritten))
 
-            if match is not None and match.group(1) == "barrier":
-                return
+                pending[0:0] = replacements
+                continue
+
+            # a fence for the compiler, not something the circuit executes
+            if name == "barrier":
+                continue
 
             expanded.append((locator, statement))
 
-        for locator, statement in statements:
-            emit(locator, statement)
         return expanded
 
     @staticmethod
     def qasm_known_gate_names(library_text: str, gate_definitions: dict) -> set[str]:
-        return set(QasmBenchUtility.qasm_gate_definitions(library_text)) | set(gate_definitions) | QasmBenchUtility.QASM_BUILTIN_GATES | {"measure", "reset"}
+        known = set()
+        known.update(QasmBenchUtility.qasm_gate_definitions(library_text))
+        known.update(gate_definitions)
+        known.update(QasmBenchUtility.QASM_BUILTIN_GATES)
+        known.update(QasmBenchUtility.QASM_HARDWARE_BASIS_GATES)
+        known.add("measure")
+        known.add("reset")
+        return known
 
     @staticmethod
     def list_qasmbench_circuits(raw_bytes: bytes) -> list[tuple[str, str, str]]:
@@ -580,7 +668,10 @@ class QasmBenchUtility:
                 continue
             filename = member.rsplit("/", 1)[-1].removesuffix(".qasm")
             benchmark = member.rsplit("/", 2)[-2]
-            variant = "transpiled" if filename.endswith("_transpiled") else "source"
+            if filename.endswith("_transpiled"):
+                variant = "transpiled"
+            else:
+                variant = "source"
             circuits.append((benchmark, variant, member))
         return circuits
 
@@ -645,10 +736,6 @@ class QasmBenchUtility:
     def validate_check(check, registers):
         problems = []
 
-        def reg_and_index(qubit_ref):
-            name, idx = qubit_ref.split("[")
-            return name, int(idx.rstrip("]"))
-
         if not check["data_qubits"]:
             problems.append(("stabilizer_check_has_data_qubits", check["ancilla_qubit"]))
         if check["ancilla_qubit"] in check["data_qubits"]:
@@ -656,7 +743,8 @@ class QasmBenchUtility:
 
         for qubit_ref in [check["ancilla_qubit"]] + check["data_qubits"]:
             try:
-                reg, idx = reg_and_index(qubit_ref)
+                reg, index_text = qubit_ref.split("[")
+                idx = int(index_text.rstrip("]"))
             except ValueError:
                 problems.append(("stabilizer_qubit_indexed", qubit_ref))
                 continue
@@ -749,7 +837,10 @@ class QasmBenchUtility:
             check_rows, trace_rows, issue_rows = QasmBenchUtility.build_stabilizer_check_rows(
                 raw_bytes, benchmark, variant, member, archive
             )
-            candidate_count += len(check_rows) + len({row["source_record_id"] for row in issue_rows})
+            rejected_ids = set()
+            for row in issue_rows:
+                rejected_ids.add(row["source_record_id"])
+            candidate_count += len(check_rows) + len(rejected_ids)
             all_check_rows.extend(check_rows)
             all_trace_rows.extend(trace_rows)
             all_issue_rows.extend(issue_rows)
@@ -828,22 +919,28 @@ class QasmBenchUtility:
             if name not in known_gates:
                 problems.append(("qasm_circuit_known_gate", name, "warning"))
 
-        issue_rows = [
-            {
-                "issue_id": "issue_" + hashlib.md5(
-                    f"{source_record_id}:{rule_id}:{observed}".encode()
-                ).hexdigest()[:12],
+        issue_rows = []
+        rejected = False
+        for rule_id, observed, severity in problems:
+            if severity == "error":
+                action = "rejected"
+                rejected = True
+            else:
+                action = "accepted"
+
+            fingerprint = f"{source_record_id}:{rule_id}:{observed}"
+            issue_rows.append({
+                "issue_id": "issue_" + hashlib.md5(fingerprint.encode()).hexdigest()[:12],
                 "source_record_id": source_record_id,
                 "rule_id": rule_id,
                 "severity": severity,
                 "observed_value": str(observed),
-                "action": "rejected" if severity == "error" else "accepted",
+                "action": action,
                 "reason": QasmBenchUtility.CIRCUIT_RULES[rule_id],
-            }
-            for rule_id, observed, severity in problems
-        ]
+            })
 
-        if any(severity == "error" for _r, _o, severity in problems):
+        # an error means the circuit never reaches Silver, but the issues do
+        if rejected:
             return [], [], issue_rows
 
 
@@ -944,7 +1041,13 @@ class QasmBenchUtility:
         statements = QasmBenchUtility.qasm_statements(qasm_text)
         q_regs, c_regs = QasmBenchUtility.qasm_registers(statements)
 
-        position = {locator: index for index, (locator, _s) in enumerate(statements)}
+        # where each statement sits in execution order, so we can tell whether
+        # the measure that writes a register comes before the if that reads it
+        position = {}
+        index = 0
+        for locator, _statement in statements:
+            position[locator] = index
+            index += 1
         measured_at = {}
         for locator, statement in statements:
             match = QasmBenchUtility.QASM_MEASURE.match(statement)
@@ -966,12 +1069,12 @@ class QasmBenchUtility:
             source_record_id = f"qasmbench:{member}#{locator}"
 
             operation_match = QasmBenchUtility.QASM_OPERATION.match(operation)
-            gate = operation_match.group(1) if operation_match else None
-            targets = (
-                [t.strip() for t in operation_match.group(3).split(",")]
-                if operation_match
-                else []
-            )
+            gate = None
+            targets = []
+            if operation_match is not None:
+                gate = operation_match.group(1)
+                for target in operation_match.group(3).split(","):
+                    targets.append(target.strip())
 
             problems = []  # (rule_id, observed_value, severity)
 
@@ -1001,7 +1104,11 @@ class QasmBenchUtility:
                     "warning",
                 ))
 
-            rejected = any(severity == "error" for _rule, _observed, severity in problems)
+            rejected = False
+            for _rule, _observed, severity in problems:
+                if severity == "error":
+                    rejected = True
+                    break
 
             for rule_id, observed, severity in problems:
                 issue_rows.append(
@@ -1061,7 +1168,13 @@ class QasmBenchUtility:
             all_trace_rows.extend(trace_rows)
             all_issue_rows.extend(issue_rows)
 
-        candidate_count = len(all_correction_rows) + len({row["source_record_id"] for row in all_issue_rows if row["action"] == "rejected"})
+        # candidates are statements that looked like a correction, accepted or
+        # not, so this reconciles against a plain text scan for "if("
+        rejected_ids = set()
+        for row in all_issue_rows:
+            if row["action"] == "rejected":
+                rejected_ids.add(row["source_record_id"])
+        candidate_count = len(all_correction_rows) + len(rejected_ids)
 
         correction_df = pd.DataFrame(all_correction_rows,columns=["source_record_id", "circuit_id", "condition_register","condition_value", "gate", "target_qubit"],).astype({
             "source_record_id": "string",
@@ -1081,6 +1194,8 @@ class QasmBenchUtility:
 class SyndromeUtility:
     BRONZE_KEY = "bronze/source=qec_syndromes/syndromes_dataset.zip"
     FILENAME_PATTERN = re.compile(r"d-(\d+)_pfr-([\d.]+)_nb-(\S+)\.csv")
+    # Column names README.txt claims the CSVs have, e.g. "- label: binary label".
+    DOCUMENTED_COLUMN_PATTERN = re.compile(r"^-\s*(\w+)\s*:", re.M)
 
     def __init__(self):
         pass
@@ -1088,7 +1203,12 @@ class SyndromeUtility:
     @staticmethod
     def list_csv_members(raw_bytes: bytes) -> list[str]:
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
-            return [n for n in z.namelist() if n.endswith(".csv")]
+            names = z.namelist()
+        csv_names = []
+        for name in names:
+            if name.endswith(".csv"):
+                csv_names.append(name)
+        return csv_names
 
     @staticmethod
     def parse_filename(csv_name: str) -> dict | None:
@@ -1096,7 +1216,15 @@ class SyndromeUtility:
         if not match:
             return None
         distance, pfr, nb = match.groups()
-        return {"distance": int(distance), "physical_fault_rate": float(pfr), "nb": nb}
+        # fault_rate_text keeps the rate exactly as the filename spells it.
+        # Formatting the float instead puts scientific notation into
+        # experiment_id: float("0.000010") renders as "1e-05".
+        return {
+            "distance": int(distance),
+            "physical_fault_rate": float(pfr),
+            "fault_rate_text": pfr,
+            "nb": nb,
+        }
 
     @staticmethod
     def parse_syndrome_bits(raw_value: str) -> bytes | None:
@@ -1117,6 +1245,61 @@ class SyndromeUtility:
         return bytes(flat_bits)
 
     @staticmethod
+    def read_documented_columns(raw_bytes: bytes) -> list[str]:
+        """Column names the bundled README.txt says the CSVs have."""
+        with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+            if "README.txt" not in z.namelist():
+                return []
+            readme = z.read("README.txt").decode("utf-8", "replace")
+        return SyndromeUtility.DOCUMENTED_COLUMN_PATTERN.findall(readme)
+
+    @staticmethod
+    def check_documented_header(
+        raw_bytes: bytes, actual_columns: list[str], run_id: str
+    ) -> list[dict]:
+        """Compare the documented column names against the real CSV header.
+
+        brief.md lists this as a minimum check: the bundled README.txt
+        documents the first column as `label`, while every CSV header actually
+        says `labels`. The data is usable either way, so this is a warning that
+        stays visible rather than a reason to reject rows.
+        """
+        documented = SyndromeUtility.read_documented_columns(raw_bytes)
+        if not documented or documented == list(actual_columns):
+            return []
+
+        missing = []
+        for name in documented:
+            if name not in actual_columns:
+                missing.append(name)
+
+        unexpected = []
+        for name in actual_columns:
+            if name not in documented:
+                unexpected.append(name)
+        return [
+            {
+                "issue_id": "iss_" + hashlib.md5(
+                    f"documented_header:{documented}:{list(actual_columns)}".encode()
+                ).hexdigest()[:12],
+                "run_id": run_id,
+                "source_record_id": None,
+                "rule_id": "syndrome_documented_header_matches",
+                "severity": "warning",
+                "observed_value": (
+                    f"README.txt documents {documented}; "
+                    f"CSV header is {list(actual_columns)}"
+                ),
+                "action": "accepted",
+                "reason": (
+                    f"documented column names differ from the header "
+                    f"(documented only: {missing}; header only: {unexpected}); "
+                    f"the header is authoritative and the rows are kept"
+                ),
+            }
+        ]
+
+    @staticmethod
     def build_rows(raw_bytes: bytes, csv_name: str, archive: str, run_id: str):
         with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
             with z.open(csv_name) as f:
@@ -1129,7 +1312,10 @@ class SyndromeUtility:
         if filename_meta is None:
             raise ValueError(f"Cannot parse experiment info from filename: {csv_name}")
 
-        experiment_id = f"syndrome_d{filename_meta['distance']}_pfr{filename_meta['physical_fault_rate']}"
+        experiment_id = (
+            f"syndrome_d{filename_meta['distance']}"
+            f"_pfr{filename_meta['fault_rate_text']}"
+        )
         archive_hash = hashlib.sha256(raw_bytes).hexdigest()
 
         rows, issue_rows, trace_rows = [], [], []
@@ -1202,6 +1388,18 @@ class SyndromeUtility:
     def syndrome_table(raw_bytes: bytes, archive: str, run_id: str):
         csv_names = SyndromeUtility.list_csv_members(raw_bytes)
         all_rows, all_issues, all_trace, rows_read = [], [], [], 0
+
+        # The documented-header mismatch is a property of the release, not of
+        # any one CSV, so it is recorded once rather than seven times.
+        if csv_names:
+            with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
+                with z.open(csv_names[0]) as f:
+                    header_columns = list(pd.read_csv(f, nrows=0).columns)
+            all_issues.extend(
+                SyndromeUtility.check_documented_header(
+                    raw_bytes, header_columns, run_id
+                )
+            )
 
         for csv_name in csv_names:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:

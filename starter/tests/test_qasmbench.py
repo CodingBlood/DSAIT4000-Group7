@@ -478,3 +478,61 @@ def test_whole_register_measure_keeps_one_locator_for_both_checks():
     assert len({c["source_record_id"] for c in checks}) == 2, (
         "the ancilla suffix must still keep the two ids distinct"
     )
+
+
+# --------------------------------------------------------------------------
+# gate-name validation
+#
+# Both of these were real false positives. Running over the release produced 80
+# "unknown gate" warnings: 74 for sx and 6 for if. Neither was a data problem.
+# --------------------------------------------------------------------------
+
+def test_hardware_basis_gate_is_not_reported_as_unknown():
+    """sx is the square root of X, a standard basis gate that transpilers emit.
+    The qelib1.inc shipped in this release predates it, so validating against
+    the library alone flagged every occurrence."""
+    qasm = "OPENQASM 2.0;\nqreg q[2];\nsx q[0];\nrz(pi/2) q[1];\n"
+    rows, _t, issues = circuits(qasm, library=LIBRARY + "gate rz(p) a { U(0,0,p) a; }\n")
+    assert len(rows) == 1
+    assert "qasm_circuit_known_gate" not in rules_fired(issues)
+
+
+def test_conditional_is_not_reported_as_a_gate_named_if():
+    """`if (creg == int) <operation>;` is a wrapper. Matching the whole
+    statement as an operation reported the gate name as "if"."""
+    qasm = PREAMBLE + "if(syn==1) x q[0];\n"
+    rows, _t, issues = circuits(qasm)
+    assert len(rows) == 1
+    unknown = [i for i in issues if i["rule_id"] == "qasm_circuit_known_gate"]
+    assert unknown == [], f"unexpected warnings: {unknown}"
+
+
+def test_operation_guarded_by_a_condition_still_counts():
+    """Unwrapping the condition means the guarded operation is counted, which
+    is what makes a conditional two-qubit gate show up in the count."""
+    plain = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q -> c;\ncx q[0],q[1];\n"
+    guarded = "OPENQASM 2.0;\nqreg q[2];\ncreg c[2];\nmeasure q -> c;\nif(c==1) cx q[0],q[1];\n"
+
+    plain_rows, _t, _i = circuits(plain)
+    guarded_rows, _t, _i = circuits(guarded)
+    assert plain_rows[0]["two_qubit_gate_count"] == 1
+    assert guarded_rows[0]["two_qubit_gate_count"] == 1
+
+
+def test_the_release_itself_produces_no_gate_warnings():
+    """Regression guard on the real archive: 80 warnings before the fix, 0
+    after. Uses Bronze, so it is skipped when the object store is unreachable."""
+    pytest.importorskip("minio")
+    try:
+        from quantum_lake_student.config import Settings
+        from quantum_lake_student.stages.prepare_data import fetch_bronze_bytes
+
+        raw = fetch_bronze_bytes(
+            Settings.from_environment(),
+            "bronze/source=qasmbench/qasmbench-qec.zip",
+        )
+    except Exception as error:                      # noqa: BLE001
+        pytest.skip(f"Bronze unavailable: {error}")
+
+    _circuit, _trace, issues, _candidates = Utility.qasmbench_circuit_table(raw)
+    assert len(issues) == 0, issues.to_dict("records")

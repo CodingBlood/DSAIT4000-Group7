@@ -69,12 +69,7 @@ def readable_error(settings: Settings, error: Exception) -> str | None:
     return None
 
 
-def git_revision() -> str:
-    import subprocess
-    try:
-        return subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, stderr=subprocess.DEVNULL).strip()
-    except Exception:
-        return "unknown"
+from .pipeline_utils import git_revision
 
 
 def run_pipeline(settings: Settings) -> None:
