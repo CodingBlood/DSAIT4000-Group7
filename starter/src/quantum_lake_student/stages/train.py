@@ -325,10 +325,9 @@ def run(model_run_id: str) -> StageResult:
     def file_hash(path):
         return hashlib.sha256(open(path, "rb").read()).hexdigest()
  
-    try:
-        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
-    except Exception:
-        revision = "unknown"
+    from quantum_lake_student.pipeline_utils import git_revision
+
+    revision = git_revision()
     import importlib.metadata as md
 
     timings = {"task_a": {}, "task_b": {}}
