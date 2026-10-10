@@ -32,6 +32,12 @@ Number of rows per split:
 
 We used the supplied splits as they are and did not move any example from one split to another.
 
+# Why each model fits its table
+
+- **Syndrome table (Task A).** Each row is one 16-bit pattern with a count of how often it happened. A logistic regression with `quantity` as the sample weight counts every simulated shot in the training files exactly once, instead of treating each distinct pattern as one shot. It gives one weight per detector bit, which we can read. The weighted prior is the simplest honest baseline to compare it with.
+- **Google table (Task B).** Each shot has five small inputs: the event density and the four 0/1 decoder predictions. A logistic regression on these learns a weighted vote between the decoders. It is easy to compare with each single decoder on the same test shots.
+- **Raw-detector table (Task C).** Each shot is 200 raw detector bits. A small MLP is the smallest model that can use combinations of bits, so it is a fair first prototype for reading raw bits directly. We do not claim it matches the supplied decoders.
+
 # Task A: weighted syndrome decoder
 
 ## Models
@@ -47,15 +53,15 @@ We used `sample_weight` (the source `quantity`) for fitting and for every metric
 |------------------------------|------------|------------------------|-----------------------|-----------------|--------------------|----------------------|
 | Weighted prior               | validation | 0.01144                | 0.500                 | 0.01228         | 0.006              | 0.0003               |
 | Weighted prior               | test       | 0.10395                | 0.500                 | 0.09691         | 0.006              | 0.0015               |
-| Weighted logistic regression | validation | 0.01151                | 0.502                 | 0.01064         | 0.616              | 0.0006               |
-| Weighted logistic regression | test       | 0.10945                | 0.522                 | 0.09096         | 0.616              | 0.0019               |
+| Weighted logistic regression | validation | 0.01151                | 0.502                 | 0.01064         | 0.126              | 0.0005               |
+| Weighted logistic regression | test       | 0.10945                | 0.522                 | 0.09096         | 0.126              | 0.0016               |
 
 **What it shows:**
 
-- The data is very imbalanced. The weighted logical-error rate goes from 0.0002 at fault rate 1e-5 to 0.19 at 1e-2 (Q1 in Part I). In the validation file about 94% of the weighted observations have an all-zero syndrome.
-- Because of this, the baseline's error rate on test (0.10395) is just the share of logical errors in the test file. It detects nothing, which is why its balanced accuracy is exactly 0.5.
-- The logistic regression did **not** improve the main metric. On test its error rate is 0.1094 against 0.1040 for the baseline, and on validation the two are almost equal.
-- It does a little better on the other two metrics. Its Brier score on test is 0.0910 against 0.0969, and its balanced accuracy is 0.522. So the 16 bits carry some information, but a simple weighted sum of the bits does not turn it into better predictions.
+- The data is very imbalanced. The weighted logical-error rate is 0.0002 at fault rate 1e-5 and 0.19 at 1e-2 (Q1 in Part I). In the validation file, about 94% of the weighted observations have an all-zero syndrome.
+- So the baseline's test error rate (0.10395) is simply the share of logical errors in the test file. It always predicts "no error" and detects nothing, which is why its balanced accuracy is exactly 0.5.
+- The logistic regression did **not** improve the main metric. On test its error rate is 0.1094, against 0.1040 for the baseline. On validation the two are almost equal.
+- It is slightly better on the other two metrics: its Brier score on test is 0.0910 against 0.0969, and its balanced accuracy is 0.522. So the 16 bits carry some information, but adding up weighted bits does not turn it into better predictions.
 - We did not tune a threshold for Task A. All predictions use 0.5.
 
 ## What the logistic regression learned
@@ -101,14 +107,14 @@ We did distance 3 and distance 5 separately, because their detector vectors have
 | Tensor-network contraction   | **0.3952**             | 0.605                 | n/a             |
 | Combined logistic regression | 0.3977                 | 0.603                 | 0.2341          | 
 
-Training the combined model took 0.054 s (distance 3) and 0.015 s (distance 5). Prediction took 0.028 s and 0.006 s.
+Training the combined model took 0.051 s (distance 3) and 0.014 s (distance 5). Prediction took 0.026 s and 0.006 s.
 
 **What it shows:**
 
-- All four decoders are better than the majority baseline, but only by about 0.05 to 0.11 in error rate. None of them is close to reliable on these shots.
+- All four decoders beat the majority baseline, but only by about 0.05 to 0.11 in error rate. None of them is close to reliable on these shots.
 - Tensor-network contraction and belief matching are the best, and PyMatching is the worst, at both distances.
-- The combined model is as good as the best single decoder, but not better. It scores 0.3972 against 0.3967 at distance 3, and 0.3977 against 0.3952 at distance 5. These differences are small compared with the sampling noise of the test sets (about 0.0015 for 100,000 shots and 0.003 for 25,000 shots), so we do not claim that one is better than the other.
-- Distance 5 error rates are about the same as distance 3 (0.395 to 0.455 against 0.397 to 0.436). These are different test sets, so we do not read more into this.
+- The combined model is as good as the best single decoder, not better: 0.3972 against 0.3967 at distance 3, and 0.3977 against 0.3952 at distance 5. These gaps are smaller than the random noise of the test sets (about 0.0015 for 100,000 shots and 0.003 for 25,000 shots), so we do not claim that either one is better.
+- Distance 5 error rates are about the same as distance 3 (0.395 to 0.455 against 0.397 to 0.436). The test sets are different, so we do not read more into this.
 
 ## Do the decoders make the same mistakes?
 
@@ -121,10 +127,10 @@ Training the combined model took 0.054 s (distance 3) and 0.015 s (distance 5). 
 
 **What it shows:**
 
-- The decoders do not make the same mistakes. About a quarter to a third of the shots that are wrong for some decoder are wrong for only one of them.
-- But they also overlap a lot. A large group of shots is wrong for all four decoders, and no vote can fix those.
-- At distance 5, belief matching and tensor-network contraction agree the most (0.49). At distance 3, the two pairs that agree the most are belief matching with tensor-network contraction (0.53) and correlated matching with PyMatching (0.53). PyMatching and tensor-network contraction agree the least at both distances (0.36 and 0.33).
-- The combined model only sees the event density and four 0/1 votes. So the best it can learn is a weighted vote. This helps when one decoder is wrong and the others are right, but not when all four are wrong. It also cannot know which shots a decoder usually gets wrong. This fits the result that it ends up close to the best single decoder and not above it.
+- The decoders do not make exactly the same mistakes. Among the shots that at least one decoder gets wrong, about a quarter to a third are wrong for only one decoder (27% at distance 3, 31% at distance 5).
+- They also overlap a lot. Many of those shots are wrong for all four decoders (21% at distance 3, 14% at distance 5), and a vote of the four cannot fix them.
+- The numbers for pairs show how often two decoders are wrong together (among shots where at least one of the two is wrong). At distance 5, belief matching and tensor-network contraction agree the most (0.49). At distance 3, two pairs tie for the most (0.53): belief matching with tensor-network contraction, and correlated matching with PyMatching. At both distances, PyMatching and tensor-network contraction agree the least (0.36 and 0.33).
+- The combined model only sees the event density and four 0/1 votes, so the most it can learn is a weighted vote. A vote helps when one decoder is wrong and the others are right. It cannot help when all four are wrong, and it cannot know which shots a decoder usually gets wrong. This fits the result that it ends up close to the best single decoder and not above it.
 
 ## What the combined models learned
 
@@ -145,20 +151,21 @@ One `MLPClassifier` with one hidden layer of 32 units (200 → 32 → 1, ReLU, A
 
 | **Split**  | **Logical-error rate** | **Balanced accuracy** | **Brier score** |
 |------------|------------------------|-----------------------|-----------------|
-| Validation | 0.4902                 | 0.510                 | 0.3804          |
-| Test       | 0.5066                 | 0.493                 | 0.3899          |
+| Validation | 0.4920                 | 0.508                 | 0.4082          |
+| Test       | 0.5044                 | 0.496                 | 0.4138          |
 
-Training took 5.46 s and prediction on the test split took 0.081 s.
+Training took 12.034 s and prediction on the test split took 0.0279 s.
 
 **What it shows:**
 
 - The model does not learn anything useful. The error rate and balanced accuracy are at chance level.
-- The Brier score of 0.39 is worse than the 0.25 of a model that always says 50%. So the network is confidently wrong.
+- The Brier score of 0.41 is worse than the 0.25 of a model that always says 50%. So the network is confidently wrong.
 - The training loss is 0.385, far below the 0.693 of a constant guess. So it fitted the 20,000 training shots, but this did not carry over to new shots.
 - It used all 200 iterations, so it stopped at the limit and not because it had converged.
 - We report this as a negative result. It shows that the packed bits can be delivered to a model in the right form. It does not show that the raw bits contain no information.
 
-**Note:** The MLP stops at the 200-iteration limit before scikit-learn considers it converged (ConvergenceWarning). Raising the limit to 500 did not remove the warning: the training loss keeps falling slowly while the model fits the training shots more closely. Because test performance does not need more iterations to be meaningful here, we kept 200.
+
+**Note:** The MLP stops at the 200-iteration limit before scikit-learn considers it converged, so it raises a ConvergenceWarning. We tried raising the limit to 500. The warning stayed, the training loss fell further, and validation balanced accuracy did not improve, so we kept 200. That is the setting in `train.py` and the one every number above comes from.
 
 ## What a flat vector of 200 bits does not show
 
@@ -187,19 +194,19 @@ The fitted models are in `results/part2/models/`.
 | `task_b_d5_combined_logistic_regression.pkl` | `LogisticRegression`, 5 weights and intercept -0.90, distance 5 only.                       |
 | `task_c_mlp.pkl`                             | `MLPClassifier`, 200 → 32 → 1.                                                              |
 
-Two things to know about this folder:
-
-- `task_b_combined_logistic_regression.pkl` is in the folder but has no entry in `metrics.json`, and its weights differ from the d3 and d5 files. It looks like a leftover from an earlier run that mixed both distances. It is not used in this report.
-- The pickle files depend on the library version. They were saved with scikit-learn 1.9.0 (see `run.json`) and give a warning with other versions. The baseline file also needs the `quantum_lake_student` package to load.
+The pickle files depend on the library version. They were saved with scikit-learn 1.9.0, which `run.json` records, and loading them with another version gives a warning. The baseline file also needs the `quantum_lake_student` package on the path, because `WeightedPriorBaseline` is our own class.
 
 # Repeatability and tracing
 
-`make train` creates the models, `predictions.parquet`, `metrics.json` and `run.json`. The file `run.json` records the release version, the SHA-256 hashes of both ML tables, the code revision, the library versions, the feature order, the split rules, the seed and the timings. Every row in `predictions.parquet` keeps its `example_id`, so a prediction can be followed back through Gold and Silver to the source files (see `results/part1/trace_examples.json`).
+- `make train` creates the models, `predictions.parquet`, `metrics.json` and `run.json` in one command. The file `run.json` records the release version, the SHA-256 hashes of both ML tables, the code revision, the library versions, the feature order, the split rules, the seed (7) and the timings. The splits are fixed rules on the data (fault rate for the syndrome table, `shot_index` for the Google table), so they do not change between runs.
+- We ran the training twice on the same inputs. All metrics were identical between the two runs. Only the timings differed, because they depend on the machine.
+- Every row in `predictions.parquet` keeps its `example_id`, so a prediction can be followed back through Gold and Silver to the source files (see `results/part1/trace_examples.json`).
 
 # Limitations
 
 - In Task A, validation and test have very different noise levels (0.0005 and 0.005), so the validation score is not a good guide for the test score. The logistic regression is also not better than the baseline on the main metric.
 - In Task B, the differences between the combined model and the best single decoder are within the sampling noise. We do not claim a ranking between them.
-- Task C is a small prototype with fixed settings and no tuning. Its failure says nothing about better-designed models.
-- Training times come from one run on one machine and are not averaged.
+- Task C is a small prototype with fixed settings and no tuning. Its failure says nothing about better-designed models. Training stops at the 200-iteration limit and gives a convergence warning. A test with 500 iterations still gave the warning and did not improve the validation score.
+- Timings depend on the machine and on what else is running, so they differ from run to run, and each is taken from a single run and not averaged. The metrics do not change between runs.
+- `train.py` only checks that the two ML Parquet files exist. It does not check their columns or types, and there are no automated tests for the training code.
 - The model files only load with the same library version that created them.
